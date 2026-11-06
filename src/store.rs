@@ -493,6 +493,12 @@ impl Store {
         Ok(())
     }
 
+    /// Drop of a connection on a project or on one of its folders: moves it to the project (if needed) and into the folder.
+    pub fn place_connection(&mut self, conn_id: &str, project: &str, folder: &str) -> Result<(), String> {
+        self.move_connection(conn_id, project)?;
+        self.move_to_folder(conn_id, folder)
+    }
+
     pub fn move_to_folder(&mut self, conn_id: &str, folder: &str) -> Result<(), String> {
         let c = self.connections.iter_mut().find(|c| c.id == conn_id).ok_or("Conexão não encontrada")?;
         c.folder = folder.to_string();
@@ -971,6 +977,28 @@ mod tests {
         assert!(!moved.exists());
         // same folder: no-op
         assert_eq!(s.move_script(&back, &loose).unwrap(), back);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn dropping_a_connection_on_a_project_or_folder() {
+        let base = temp_base("drop");
+        let mut s = Store::memory();
+        let a = s.create_project("A", &base.join("a")).unwrap();
+        let b = s.create_project("B", &base.join("b")).unwrap();
+        s.add_folder(&b.id, "Prod").unwrap();
+        let mut c = conn("Banco", "");
+        c.project = a.id.clone();
+        c.folder = "Velha".into();
+        let cid = c.id.clone();
+        s.connections.push(c);
+        s.place_connection(&cid, &b.id, "Prod").unwrap();
+        assert_eq!((s.connections[0].project.as_str(), s.connections[0].folder.as_str()), (b.id.as_str(), "Prod"));
+        s.place_connection(&cid, &b.id, "").unwrap();
+        assert!(s.connections[0].folder.is_empty(), "dropped on the project row: root of the project");
+        s.place_connection(&cid, "", "").unwrap();
+        assert!(s.connections[0].project.is_empty(), "dropped on the default project");
+        assert!(s.place_connection(&cid, "nao-existe", "").is_err());
         let _ = std::fs::remove_dir_all(&base);
     }
 

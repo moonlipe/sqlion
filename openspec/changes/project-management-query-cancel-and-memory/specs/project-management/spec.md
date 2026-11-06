@@ -61,3 +61,22 @@ O sistema SHALL oferecer, no menu do projeto, status e commit git da pasta do pr
 #### Scenario: Commit do projeto
 - **WHEN** o usuário aciona Versionamento e confirma o commit
 - **THEN** as alterações da pasta do projeto são gravadas no git, sem senhas nem histórico
+
+### Requirement: Arrastar e soltar na árvore
+Os itens da árvore do navegador SHALL poder ser arrastados com o mouse: uma conexão pode ser solta sobre um projeto (vai para a raiz dele) ou sobre uma pasta de organização; um script pode ser solto sobre um projeto ou sobre "Scripts soltos". O destino SHALL ser destacado durante o arraste, e as mesmas regras do menu "Mover para…" valem (recusar nome de script em conflito, preservar id e vínculos).
+
+#### Scenario: Arrastar conexão para outro projeto
+- **WHEN** o usuário arrasta uma conexão e a solta sobre outro projeto
+- **THEN** a conexão passa a pertencer a esse projeto, na raiz dele
+
+#### Scenario: Arrastar conexão para uma pasta
+- **WHEN** a conexão é solta sobre uma pasta de organização
+- **THEN** ela vai para o projeto da pasta e para dentro da pasta
+
+#### Scenario: Arrastar script
+- **WHEN** um script é solto sobre outro projeto ou sobre "Scripts soltos"
+- **THEN** o arquivo é movido, a aba aberta segue o novo caminho e a conexão vinculada é mantida
+
+#### Scenario: Soltar em lugar inválido
+- **WHEN** o item é solto fora de um destino válido ou sobre o próprio dono
+- **THEN** nada muda

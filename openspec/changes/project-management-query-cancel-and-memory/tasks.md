@@ -36,6 +36,10 @@
 - [ ] 6.2 Árvore com scripts sob o projeto e nó "Scripts soltos"; verificar por captura de tela e teste de listagem por projeto.
 - [ ] 6.3 Mover script entre projeto e soltos pelo menu, atualizando aba aberta e `script_conns`, e recusando nome em conflito; verificar com testes de mover, conflito e aba aberta.
 
-## 7. Integração
+## 7. Arrastar e soltar
 
-- [ ] 7.1 Rodar `cargo test` e `cargo build --release` e percorrer manualmente os cenários das specs (criar/abrir/converter projeto, fechar última aba, cancelar consulta longa em cada banco disponível, memória após fechar scripts, aviso de Auto); anotar o que ficou de fora e marcar 4.4–4.6 de `add-projects-and-workspace-polish` como absorvidas.
+- [x] 7.1 Linhas da árvore arrastáveis (conexões e scripts), destinos destacados (projeto, pasta, scripts soltos) e movimento pelas mesmas regras do menu; verificar com teste do gesto de arrastar entre duas linhas, com teste de `place_connection` (projeto, pasta, raiz, padrão, inexistente) e pelos testes de `move_script`.
+
+## 8. Integração
+
+- [ ] 8.1 Rodar `cargo test` e `cargo build --release` e percorrer manualmente os cenários das specs (criar/abrir/converter projeto, fechar última aba, cancelar consulta longa em cada banco disponível, memória após fechar scripts, aviso de Auto); anotar o que ficou de fora e marcar 4.4–4.6 de `add-projects-and-workspace-polish` como absorvidas.

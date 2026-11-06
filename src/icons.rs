@@ -458,7 +458,7 @@ pub fn tree_row(ui: &mut Ui, lead: Lead, dot: Option<Color32>, text: RichText, s
     let g = ui.painter().layout_no_wrap(text.text().to_string(), font.clone(), Color32::PLACEHOLDER);
     let gs = if suffix.is_empty() { None } else { Some(ui.painter().layout_no_wrap(suffix.to_string(), egui::TextStyle::Small.resolve(ui.style()), Color32::PLACEHOLDER)) };
     let w = (isz + 18.0 + g.size().x + gs.as_ref().map(|s| s.size().x + 8.0).unwrap_or(0.0) + 12.0).max(60.0);
-    let (rect, resp) = ui.allocate_exact_size(vec2(w, 24.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 24.0), Sense::click_and_drag());
     let pt = ui.painter();
     if let Some(t) = tint {
         pt.rect_filled(rect, CornerRadius::same(5), t);

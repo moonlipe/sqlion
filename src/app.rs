@@ -9,6 +9,13 @@ use crate::tabs::*;
 use egui::collapsing_header::CollapsingState;
 use egui::{Color32, Key, Modifiers, RichText, Ui};
 
+/// What is being dragged in the navigator.
+#[derive(Clone)]
+pub enum Dragged {
+    Conn(String),
+    Script(std::path::PathBuf),
+}
+
 #[derive(Clone, PartialEq)]
 pub enum NavSel {
     Conn(String),
@@ -1098,6 +1105,9 @@ impl App {
                 Some(p) => r.on_hover_text(format!("Projeto: {}", p.path)),
                 None => r.on_hover_text(format!("Projeto padrão: dados em {}", store::config_dir().display())),
             };
+            if let Some(d) = self.dnd_target(ui, &r) {
+                self.drop_on_project(d, &pid);
+            }
             r.context_menu(|ui| self.project_menu(ui, p));
         });
         hdr.body(|ui| {
@@ -1107,6 +1117,10 @@ impl App {
                 let st = CollapsingState::load_with_default_open(ui.ctx(), fid, true);
                 let h = st.show_header(ui, |ui| {
                     let r = icons::tree_row(ui, icons::Lead::Icon(Icon::Folder, pl.warn), None, RichText::new(f), &n.to_string(), false, None);
+                    match self.dnd_target(ui, &r) {
+                        Some(Dragged::Conn(id)) => self.drop_conn(&id, &pid, f),
+                        Some(Dragged::Script(_)) | None => {}
+                    }
                     r.context_menu(|ui| {
                         if ui.button("Renomear pasta…").clicked() {
                             self.dialog = Some(Dialog::Folder { project: pid.clone(), old: Some(f.clone()), name: f.clone(), msg: None });
@@ -1134,6 +1148,51 @@ impl App {
                 self.scripts_node(ui, Some(p));
             }
         });
+    }
+
+    /// Makes a tree row draggable; a label follows the pointer while dragging.
+    fn dnd_source(&self, ui: &Ui, r: &egui::Response, payload: Dragged, label: &str) {
+        if r.drag_started() {
+            r.dnd_set_drag_payload(payload);
+        }
+        if r.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            if let Some(pos) = ui.ctx().pointer_interact_pos() {
+                let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("dnd_label"));
+                let pt = ui.ctx().layer_painter(layer);
+                let g = pt.layout_no_wrap(label.to_string(), egui::TextStyle::Body.resolve(ui.style()), ui.visuals().text_color());
+                let rect = egui::Rect::from_min_size(pos + egui::vec2(12.0, 8.0), g.size()).expand2(egui::vec2(6.0, 3.0));
+                pt.rect_filled(rect, 4.0, ui.visuals().window_fill());
+                pt.rect_stroke(rect, 4.0, egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color), egui::StrokeKind::Inside);
+                pt.galley(rect.min + egui::vec2(6.0, 3.0), g, ui.visuals().text_color());
+            }
+        }
+    }
+
+    /// Drop target: highlights while something is dragged over the row and returns the payload when it is released.
+    fn dnd_target(&self, ui: &Ui, r: &egui::Response) -> Option<Dragged> {
+        if r.dnd_hover_payload::<Dragged>().is_some() {
+            let pl = pal(self.sh.store.prefs.dark);
+            ui.painter().rect_stroke(r.rect, 5.0, egui::Stroke::new(1.5, pl.accent), egui::StrokeKind::Inside);
+        }
+        r.dnd_release_payload::<Dragged>().map(|d| (*d).clone())
+    }
+
+    fn drop_on_project(&mut self, d: Dragged, project: &str) {
+        match d {
+            Dragged::Conn(id) => self.drop_conn(&id, project, ""),
+            Dragged::Script(p) => self.move_script_to(&p, if project.is_empty() { None } else { Some(project) }),
+        }
+    }
+
+    fn drop_conn(&mut self, id: &str, project: &str, folder: &str) {
+        match self.sh.store.place_connection(id, project, folder) {
+            Ok(_) => {
+                self.sh.save();
+                self.toast("Conexão movida");
+            }
+            Err(e) => self.toast(e),
+        }
     }
 
     fn delete_folder(&mut self, project: &str, folder: &str) {
@@ -1255,6 +1314,10 @@ impl App {
         let hdr = st.show_header(ui, |ui| {
             let r = icons::tree_row(ui, icons::Lead::Icon(Icon::Folder, pl.warn), None, RichText::new(label).strong(), &scripts.len().to_string(), false, None);
             let r = r.on_hover_text(format!("Pasta: {}", dir.display()));
+            match self.dnd_target(ui, &r) {
+                Some(Dragged::Script(path)) => self.move_script_to(&path, pid.as_deref()),
+                Some(Dragged::Conn(_)) | None => {}
+            }
             r.context_menu(|ui| {
                 if ui.button("Novo script").clicked() {
                     self.new_script_in(pid.clone());
@@ -1297,6 +1360,7 @@ impl App {
                 let conn_hint = self.sh.store.script_conn_of(&p).filter(|c| self.sh.cfg(c).is_some()).map(|c| self.sh.conn_name(&c)).unwrap_or_default();
                 let r = icons::tree_row(ui, icons::Lead::Icon(Icon::Script, pl.weak), dot, RichText::new(&name), suffix, false, None);
                 let r = if conn_hint.is_empty() { r } else { r.on_hover_text(format!("Última conexão: {}", conn_hint)) };
+                self.dnd_source(ui, &r, Dragged::Script(p.clone()), &name);
                 if r.double_clicked() {
                     self.open_script_file(&p);
                 }
@@ -1367,6 +1431,7 @@ impl App {
                 sel,
                 tint,
             );
+            self.dnd_source(ui, &r, Dragged::Conn(id.clone()), &c.display_name());
             if r.clicked() {
                 self.nav_sel = Some(NavSel::Conn(id.clone()));
             }
@@ -1991,5 +2056,53 @@ mod auto_commit_confirmation_tests {
         assert!(!need(Auto, Auto, 0, 0, true), "already Auto");
         assert!(!need(Auto, Manual, 0, 0, true), "only Auto asks");
         assert!(!need(Manual, Smart, 3, 3, true));
+    }
+}
+
+#[cfg(test)]
+mod dnd_tests {
+    use super::Dragged;
+    use crate::icons::{self, Icon, Lead};
+    use egui::{Event, PointerButton, Pos2, RawInput, Rect};
+
+    /// Drags the first tree row onto the second one and reports the payload received on release.
+    #[test]
+    fn dragging_a_tree_row_onto_another_delivers_the_payload() {
+        let ctx = egui::Context::default();
+        let mut got: Option<String> = None;
+        let mut rows: Vec<Rect> = Vec::new();
+        let mut t = 0.0;
+        let mut frame = |events: Vec<Event>, got: &mut Option<String>, rows: &mut Vec<Rect>| {
+            t += 0.05;
+            let mut input = RawInput::default();
+            input.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 300.0)));
+            input.time = Some(t);
+            input.events = events;
+            let mut out = ctx.run_ui(input, |ui| {
+                rows.clear();
+                let a = icons::tree_row(ui, Lead::Icon(Icon::Table, egui::Color32::GRAY), None, egui::RichText::new("conexão"), "", false, None);
+                if a.drag_started() {
+                    a.dnd_set_drag_payload(Dragged::Conn("c1".into()));
+                }
+                let b = icons::tree_row(ui, Lead::Icon(Icon::Folder, egui::Color32::GRAY), None, egui::RichText::new("projeto"), "", false, None);
+                if let Some(Dragged::Conn(id)) = b.dnd_release_payload::<Dragged>().map(|d| (*d).clone()) {
+                    *got = Some(id);
+                }
+                rows.push(a.rect);
+                rows.push(b.rect);
+            });
+            out.textures_delta.clear();
+        };
+        frame(vec![], &mut got, &mut rows);
+        frame(vec![], &mut got, &mut rows);
+        let (from, to) = (rows[0].center(), rows[1].center());
+        let btn = |pressed| Event::PointerButton { pos: if pressed { from } else { to }, button: PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        frame(vec![Event::PointerMoved(from)], &mut got, &mut rows);
+        frame(vec![btn(true)], &mut got, &mut rows);
+        frame(vec![Event::PointerMoved(Pos2::new(from.x + 4.0, from.y + 14.0))], &mut got, &mut rows);
+        frame(vec![Event::PointerMoved(to)], &mut got, &mut rows);
+        frame(vec![btn(false)], &mut got, &mut rows);
+        frame(vec![], &mut got, &mut rows);
+        assert_eq!(got.as_deref(), Some("c1"));
     }
 }
