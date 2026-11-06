@@ -1,0 +1,515 @@
+{
+ "version": 1,
+ "values": [
+  {
+   "name": "linhas por página",
+   "group": "resultados",
+   "value": 200,
+   "unit": "linhas",
+   "source": "ModelPreferences.java:356"
+  },
+  {
+   "name": "delimitador de instrução",
+   "group": "editor SQL",
+   "value": ";",
+   "source": "SQLConstants.java:31"
+  },
+  {
+   "name": "prefixo de parâmetro nomeado",
+   "group": "editor SQL",
+   "value": ":",
+   "source": "SQLConstants.java:691"
+  },
+  {
+   "name": "marca de parâmetro anônimo",
+   "group": "editor SQL",
+   "value": "?",
+   "source": "SQLConstants.java:690"
+  },
+  {
+   "name": "prefixo de comando de controle",
+   "group": "editor SQL",
+   "value": "@",
+   "source": "SQLConstants.java:695"
+  },
+  {
+   "name": "parâmetros SQL ligados",
+   "group": "editor SQL",
+   "value": true,
+   "source": "ModelPreferences.java:385"
+  },
+  {
+   "name": "variáveis ${var} ligadas",
+   "group": "editor SQL",
+   "value": true,
+   "source": "ModelPreferences.java:391"
+  },
+  {
+   "name": "remover ; final",
+   "group": "editor SQL",
+   "value": true,
+   "source": "ModelPreferences.java:333"
+  },
+  {
+   "name": "dias de histórico",
+   "group": "histórico",
+   "value": 90,
+   "unit": "dias",
+   "source": "ModelPreferences.java:377"
+  },
+  {
+   "name": "entradas por página do histórico",
+   "group": "histórico",
+   "value": 200,
+   "source": "ModelPreferences.java:378"
+  },
+  {
+   "name": "níveis de desfazer da grade",
+   "group": "resultados",
+   "value": 200,
+   "source": "ResultSetPreferences.java:27"
+  },
+  {
+   "name": "largura máxima da coluna",
+   "group": "resultados",
+   "value": 30,
+   "unit": "caracteres",
+   "source": "ResultSetPreferences.java:26"
+  },
+  {
+   "name": "formato de data",
+   "group": "formatos",
+   "value": "yyyy-MM-dd",
+   "source": "DBConstants.java:109"
+  },
+  {
+   "name": "formato de timestamp",
+   "group": "formatos",
+   "value": "yyyy-MM-dd HH:mm:ss.SSS",
+   "source": "DBConstants.java:110"
+  },
+  {
+   "name": "porta PostgreSQL",
+   "group": "conexão",
+   "value": 5432,
+   "source": "ext.postgresql/plugin.xml:377"
+  },
+  {
+   "name": "porta MySQL",
+   "group": "conexão",
+   "value": 3306,
+   "source": "ext.mysql/plugin.xml:172"
+  },
+  {
+   "name": "CSV delimitador",
+   "group": "exportação",
+   "value": ",",
+   "source": "data.transfer/plugin.xml:153"
+  },
+  {
+   "name": "SQL linhas por INSERT",
+   "group": "exportação",
+   "value": 10,
+   "source": "data.transfer/plugin.xml:200"
+  },
+  {
+   "name": "TXT lote",
+   "group": "exportação",
+   "value": 200,
+   "source": "data.transfer/plugin.xml:220"
+  },
+  {
+   "name": "amostras para tipo de coluna (importação)",
+   "group": "importação",
+   "value": 100,
+   "source": "data.transfer/plugin.xml:62"
+  },
+  {
+   "name": "auto-commit padrão",
+   "group": "conexão",
+   "value": "depende do tipo: dev e teste sim, produção não",
+   "source": "DBPConnectionType.java:51,70,89"
+  },
+  {
+   "name": "nome do arquivo de exportação",
+   "group": "exportação",
+   "value": "${table}_${timestamp}",
+   "source": "StreamConsumerSettings.java:125"
+  },
+  {
+   "name": "atalho executar instrução",
+   "group": "controles",
+   "value": "Ctrl+Enter",
+   "source": "ui.editors.sql/plugin.xml:836 run.statement"
+  },
+  {
+   "name": "atalho executar script",
+   "group": "controles",
+   "value": "Alt+X",
+   "source": "ext.ui.editors.sql/plugin.xml run.script"
+  },
+  {
+   "name": "atalho plano de execução",
+   "group": "controles",
+   "value": "Ctrl+Shift+E",
+   "source": "ext.ui.editors.sql/plugin.xml run.explain"
+  },
+  {
+   "name": "atalho formatar SQL",
+   "group": "controles",
+   "value": "Ctrl+Shift+F",
+   "source": "ext.ui.editors.sql/plugin.xml format"
+  },
+  {
+   "name": "atalho comentar",
+   "group": "controles",
+   "value": "Ctrl+/",
+   "source": "ext.ui.editors.sql/plugin.xml comment.single"
+  },
+  {
+   "name": "atalho executar em nova aba",
+   "group": "controles",
+   "value": "Ctrl+\\",
+   "source": "ui.editors.sql/plugin.xml:839 run.statementNew"
+  },
+  {
+   "name": "rótulo de NULL",
+   "group": "resultados",
+   "value": "[NULL]",
+   "source": "DBConstants.java:71"
+  },
+  {
+   "name": "bytes mostrados de dado binário",
+   "group": "resultados",
+   "value": 32,
+   "unit": "bytes",
+   "source": "ModelPreferences.java:370"
+  },
+  {
+   "name": "cor conexão teste",
+   "group": "tipos de conexão",
+   "value": "214,250,207",
+   "source": "DBPConnectionType.java:67"
+  },
+  {
+   "name": "cor conexão produção",
+   "group": "tipos de conexão",
+   "value": "250,207,207",
+   "source": "DBPConnectionType.java:86"
+  },
+  {
+   "name": "produção confirma execução",
+   "group": "tipos de conexão",
+   "value": true,
+   "source": "DBPConnectionType.java:90"
+  },
+  {
+   "name": "produção auto-commit",
+   "group": "tipos de conexão",
+   "value": false,
+   "source": "DBPConnectionType.java:89"
+  },
+  {
+   "name": "teste e produção confirmam alteração de dados",
+   "group": "tipos de conexão",
+   "value": true,
+   "source": "DBPConnectionType.java:72,91"
+  },
+  {
+   "name": "porta SQL Server",
+   "group": "conexão",
+   "value": 1433,
+   "source": "ext.mssql/plugin.xml:184"
+  },
+  {
+   "name": "porta TiDB",
+   "group": "conexão",
+   "value": 4000,
+   "source": "ext.tidb/plugin.xml:80"
+  },
+  {
+   "name": "porta StarRocks e Doris",
+   "group": "conexão",
+   "value": 9030,
+   "source": "ext.starrocks/plugin.xml:38"
+  },
+  {
+   "name": "porta OceanBase",
+   "group": "conexão",
+   "value": 2881,
+   "source": "ext.oceanbase/plugin.xml:32"
+  },
+  {
+   "name": "porta YugabyteDB",
+   "group": "conexão",
+   "value": 5433,
+   "source": "ext.postgresql/plugin.xml:494"
+  },
+  {
+   "name": "porta CockroachDB",
+   "group": "conexão",
+   "value": 26257,
+   "source": "ext.postgresql/plugin.xml:517"
+  },
+  {
+   "name": "porta Redshift",
+   "group": "conexão",
+   "value": 5439,
+   "source": "ext.postgresql/plugin.xml:563"
+  },
+  {
+   "name": "porta MongoDB",
+   "group": "conexão",
+   "value": 27017,
+   "estimated": true
+  },
+  {
+   "name": "nova linha depois da linha atual",
+   "group": "edição",
+   "value": true,
+   "source": "DataEditorsPreferencesInitializer.java:48"
+  },
+  {
+   "name": "buscar próxima página ao rolar",
+   "group": "resultados",
+   "value": true,
+   "source": "DataEditorsPreferencesInitializer.java:58"
+  },
+  {
+   "name": "booleano como caixa de seleção",
+   "group": "resultados",
+   "value": true,
+   "source": "DataEditorsPreferencesInitializer.java:70"
+  },
+  {
+   "name": "clique alterna booleano",
+   "group": "edição",
+   "value": true,
+   "source": "DataEditorsPreferencesInitializer.java:72"
+  },
+  {
+   "name": "duplo clique",
+   "group": "edição",
+   "value": "editor na célula",
+   "source": "DataEditorsPreferencesInitializer.java:74"
+  },
+  {
+   "name": "alinhar números à direita",
+   "group": "resultados",
+   "value": true,
+   "source": "DataEditorsPreferencesInitializer.java:91"
+  },
+  {
+   "name": "alinhar datas à direita",
+   "group": "resultados",
+   "value": true,
+   "source": "DataEditorsPreferencesInitializer.java:92"
+  },
+  {
+   "name": "usar todas as colunas como chave",
+   "group": "edição",
+   "value": false,
+   "source": "DataEditorsPreferencesInitializer.java:41"
+  },
+  {
+   "name": "bloquear edição sem chave",
+   "group": "edição",
+   "value": false,
+   "source": "DataEditorsPreferencesInitializer.java:42"
+  },
+  {
+   "name": "reler depois de salvar",
+   "group": "edição",
+   "value": true,
+   "source": "DataEditorsPreferencesInitializer.java:49"
+  },
+  {
+   "name": "tamanho máximo da coluna no modo texto",
+   "group": "resultados",
+   "value": 255,
+   "unit": "caracteres",
+   "source": "DataEditorsPreferencesInitializer.java:103"
+  },
+  {
+   "name": "linhas adicionadas por vez",
+   "group": "edição",
+   "value": 1,
+   "source": "DataEditorsPreferencesInitializer.java:93"
+  },
+  {
+   "name": "erro em script",
+   "group": "editor SQL",
+   "value": "parar e reverter",
+   "source": "SQLEditorPreferencesInitializer.java:49"
+  },
+  {
+   "name": "commit dentro do script",
+   "group": "editor SQL",
+   "value": "nenhum",
+   "source": "SQLEditorPreferencesInitializer.java:47"
+  },
+  {
+   "name": "máximo de abas de resultado por consulta",
+   "group": "editor SQL",
+   "value": 20,
+   "source": "SQLEditorPreferencesInitializer.java:140"
+  },
+  {
+   "name": "autocompletar abre sozinho",
+   "group": "editor SQL",
+   "value": true,
+   "source": "SQLEditorPreferencesInitializer.java:85"
+  },
+  {
+   "name": "atraso do autocompletar",
+   "group": "editor SQL",
+   "value": 0,
+   "unit": "ms",
+   "source": "SQLEditorPreferencesInitializer.java:88"
+  },
+  {
+   "name": "autocompletar: casar por contém",
+   "group": "editor SQL",
+   "value": true,
+   "source": "SQLEditorPreferencesInitializer.java:107"
+  },
+  {
+   "name": "autocompletar: ordem alfabética",
+   "group": "editor SQL",
+   "value": true,
+   "source": "SQLEditorPreferencesInitializer.java:105"
+  },
+  {
+   "name": "inserir proposta única",
+   "group": "editor SQL",
+   "value": true,
+   "source": "SQLEditorPreferencesInitializer.java:89"
+  },
+  {
+   "name": "fechar aspas e parênteses",
+   "group": "editor SQL",
+   "value": true,
+   "source": "SQLEditorPreferencesInitializer.java:119"
+  },
+  {
+   "name": "formatar só a consulta ativa",
+   "group": "editor SQL",
+   "value": true,
+   "source": "SQLEditorPreferencesInitializer.java:129"
+  },
+  {
+   "name": "caixa das palavras-chave automática",
+   "group": "editor SQL",
+   "value": true,
+   "source": "SQLEditorPreferencesInitializer.java:126"
+  },
+  {
+   "name": "apagar script novo vazio",
+   "group": "editor SQL",
+   "value": "sim",
+   "source": "SQLEditorPreferencesInitializer.java:74"
+  },
+  {
+   "name": "pastas de objetos por esquema (PostgreSQL)",
+   "group": "navegador",
+   "value": 11,
+   "source": "ext.postgresql/plugin.xml:141-283"
+  },
+  {
+   "name": "pastas de objetos por esquema (MySQL)",
+   "group": "navegador",
+   "value": 8,
+   "source": "ext.mysql/plugin.xml:26-108"
+  },
+  {
+   "name": "pastas de objetos por esquema (SQL Server)",
+   "group": "navegador",
+   "value": 9,
+   "source": "ext.mssql/plugin.xml:55-158"
+  },
+  {
+   "name": "recuo do formatador",
+   "group": "formatador",
+   "value": "4 espaços",
+   "source": "SQLFormatterConfiguration.java:45"
+  },
+  {
+   "name": "vírgula antes da linha (formatador)",
+   "group": "formatador",
+   "value": false,
+   "source": "ModelPreferences.java:395"
+  },
+  {
+   "name": "quebrar antes de fechar parêntese (formatador)",
+   "group": "formatador",
+   "value": false,
+   "source": "ModelPreferences.java:399"
+  },
+  {
+   "name": "delimitadores em linhas vazias (formatador)",
+   "group": "formatador",
+   "value": false,
+   "source": "ModelPreferences.java:400"
+  },
+  {
+   "name": "formatador: conteúdo de FROM/WHERE/ORDER BY na linha de baixo",
+   "group": "formatador",
+   "value": true,
+   "source": "IndentFormatter.java:198-210"
+  },
+  {
+   "name": "formatador: ; seguido de linha em branco",
+   "group": "formatador",
+   "value": true,
+   "source": "IndentFormatter.java:451-459"
+  },
+  {
+   "name": "tentativa com senha de formato antigo",
+   "group": "conexão",
+   "value": "automática",
+   "source": "mysql 25.0.1 conn/mod.rs:599-620 (secure_auth)"
+  },
+  {
+   "name": "nome do primeiro script",
+   "group": "scripts",
+   "value": "Script",
+   "source": "SQLEditor.java:185 DEFAULT_SCRIPT_FILE_NAME"
+  },
+  {
+   "name": "pasta padrão dos scripts",
+   "group": "scripts",
+   "value": "~/.config/dbeaver-rust/scripts",
+   "estimated": true
+  },
+  {
+   "name": "conexão MySQL usa só TCP (sem socket Unix)",
+   "group": "conexão",
+   "value": true,
+   "source": "ERROR 1193 observado em MySQL 5.0.51a; mysql 25.0.1 opts prefer_socket"
+  },
+  {
+   "name": "comandos de controle",
+   "group": "editor SQL",
+   "value": "@set @unset @echo @export @include",
+   "source": "model.sql/plugin.xml:72-75; ui.editors.sql/plugin.xml:55"
+  },
+  {
+   "name": "@export: pasta padrão",
+   "group": "exportação",
+   "value": "pasta do usuário",
+   "source": "StreamConsumerSettings.java:124"
+  },
+  {
+   "name": "@export: consome a próxima consulta",
+   "group": "exportação",
+   "value": true,
+   "source": "SQLPragmaExport.java:111"
+  },
+  {
+   "name": "comando de controle termina no fim da linha",
+   "group": "editor SQL",
+   "value": true,
+   "estimated": true
+  }
+ ]
+}

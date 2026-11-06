@@ -1,0 +1,21 @@
+/target
+*.log
+
+# bancos locais e dados de teste
+*.sqlite
+*.sqlite3
+*.db
+
+# configuração/credenciais locais
+.env
+*.pem
+
+# editor / SO
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# profiling / ferramentas
+perf.data*
+flamegraph.svg
