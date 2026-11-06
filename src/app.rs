@@ -254,7 +254,39 @@ impl App {
         let repo = avail && crate::git::is_repo(&dir);
         let (branch, changed) = if repo { (crate::git::branch(&dir).unwrap_or_default(), crate::git::changed_files(&dir).len()) } else { (String::new(), 0) };
         let msg = format!("Atualiza scripts ({})", chrono::Local::now().format("%Y-%m-%d %H:%M"));
-        self.dialog = Some(Dialog::Git { msg, output: String::new(), avail, repo, branch, changed });
+        self.dialog = Some(Dialog::Git { msg, output: String::new(), avail, repo, branch, changed, dir });
+    }
+
+    pub fn open_git_dialog_for(&mut self, dir: std::path::PathBuf) {
+        let avail = crate::git::available();
+        let repo = avail && crate::git::is_repo(&dir);
+        let (branch, changed) = if repo { (crate::git::branch(&dir).unwrap_or_default(), crate::git::changed_files(&dir).len()) } else { (String::new(), 0) };
+        let msg = format!("Atualiza o projeto ({})", chrono::Local::now().format("%Y-%m-%d %H:%M"));
+        self.dialog = Some(Dialog::Git { msg, output: String::new(), avail, repo, branch, changed, dir });
+    }
+
+    /// True when the tab depends on the project: a script file inside it or a connection that belongs to it.
+    pub fn tab_in_project(&self, t: &Tab, project: &str) -> bool {
+        let dir = self.sh.store.projects.iter().find(|p| p.id == project).map(|p| p.dir());
+        let conn_in = |c: &str| self.sh.cfg(c).map(|x| x.project == project).unwrap_or(false);
+        match &t.kind {
+            TabKind::Sql(s) => s.file.as_ref().zip(dir.as_ref()).map(|(f, d)| f.starts_with(d)).unwrap_or(false) || s.conn.as_deref().map(conn_in).unwrap_or(false),
+            TabKind::Table(tt) => conn_in(&tt.conn),
+            TabKind::Er(e) => conn_in(&e.conn),
+            TabKind::Welcome => false,
+        }
+    }
+
+    /// Closes (without saving) the tabs that depend on a project that is about to be deleted.
+    pub fn close_tabs_of_project(&mut self, project: &str) {
+        let keep: Vec<bool> = self.tabs.iter().map(|t| !self.tab_in_project(t, project)).collect();
+        let mut it = keep.into_iter();
+        self.tabs.retain(|_| it.next().unwrap_or(true));
+        if self.tabs.is_empty() {
+            self.active = 0;
+        } else if self.active >= self.tabs.len() {
+            self.active = self.tabs.len() - 1;
+        }
     }
 
     pub fn current_conn(&self) -> Option<String> {
@@ -640,7 +672,7 @@ impl App {
                     });
                     if mode != TxMode::Auto {
                         ui.add_enabled_ui(open, |ui| {
-                            if icons::button(ui, Icon::Check, &format!("Commit ({})", rows)).on_hover_text(format!("{} registro(s) afetado(s) em {} instrução(ões) pendente(s)", rows, n)).clicked() {
+                            if icons::button(ui, Icon::Check, &commit_label(n, rows)).on_hover_text(format!("{} registro(s) afetado(s) em {} instrução(ões) pendente(s)", rows, n)).clicked() {
                                 self.tx_action(true);
                             }
                             if icons::button(ui, Icon::Undo, "Rollback").clicked() {
@@ -848,9 +880,10 @@ impl App {
         });
         ui.add(egui::TextEdit::singleline(&mut self.nav_filter).hint_text("Filtrar tabelas…").desired_width(f32::INFINITY));
         ui.add_space(4.0);
-        let conns = self.sh.store.connections.clone();
+        let conns: Vec<ConnConfig> = self.sh.store.connections.iter().filter(|c| c.project.is_empty()).cloned().collect();
+        let projects = self.sh.store.projects.clone();
         egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-            if conns.is_empty() {
+            if conns.is_empty() && projects.is_empty() {
                 ui.add_space(10.0);
                 ui.label(RichText::new("Nenhuma conexão ainda.").color(pl.weak));
                 if icons::primary(ui, Icon::Plug, "Criar conexão").clicked() {
@@ -870,11 +903,94 @@ impl App {
                     }
                 });
             }
+            for p in projects {
+                self.project_node(ui, &p);
+            }
             ui.add_space(8.0);
             if self.sh.persist {
                 self.scripts_node(ui);
             }
         });
+    }
+
+    fn project_node(&mut self, ui: &mut Ui, p: &store::Project) {
+        let pl = pal(self.sh.store.prefs.dark);
+        let conns: Vec<ConnConfig> = self.sh.store.connections.iter().filter(|c| c.project == p.id).cloned().collect();
+        let st = CollapsingState::load_with_default_open(ui.ctx(), egui::Id::new(("project", &p.id)), true);
+        let hdr = st.show_header(ui, |ui| {
+            let r = icons::tree_row(ui, icons::Lead::Icon(Icon::Folder, pl.accent), None, RichText::new(&p.name).strong(), &conns.len().to_string(), false, None);
+            let r = r.on_hover_text(format!("Projeto: {}", p.path));
+            r.context_menu(|ui| self.project_menu(ui, p));
+        });
+        hdr.body(|ui| {
+            if conns.is_empty() {
+                ui.label(RichText::new("(nenhuma conexão)").small().color(pl.weak));
+            }
+            for c in &conns {
+                self.conn_node(ui, c);
+            }
+        });
+    }
+
+    fn project_menu(&mut self, ui: &mut Ui, p: &store::Project) {
+        if ui.button("Renomear…").clicked() {
+            self.dialog = Some(Dialog::RenameProject { id: p.id.clone(), name: p.name.clone(), msg: None });
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Novo script").clicked() {
+            let dir = p.scripts_dir();
+            let _ = std::fs::create_dir_all(&dir);
+            let mut n = 1;
+            let path = loop {
+                let f = dir.join(format!("novo-{}.sql", n));
+                if !f.exists() {
+                    break f;
+                }
+                n += 1;
+            };
+            if std::fs::write(&path, "").is_ok() {
+                self.open_script_file(&path);
+            }
+            ui.close();
+        }
+        if ui.button("Nova conexão neste projeto…").clicked() {
+            self.sh.req(Req::NewConnIn(p.id.clone()));
+            ui.close();
+        }
+        if ui.button("Versionamento (git)…").clicked() {
+            self.open_git_dialog_for(p.dir());
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Abrir a pasta").clicked() {
+            crate::shared::open_path(&p.dir());
+            ui.close();
+        }
+        if ui.button("Copiar o caminho").clicked() {
+            ui.ctx().copy_text(p.path.clone());
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Remover da lista").on_hover_text("Fecha o projeto; a pasta continua no disco").clicked() {
+            for i in 0..self.tabs.len() {
+                if self.tab_in_project(&self.tabs[i], &p.id) {
+                    if let TabKind::Sql(sq) = &mut self.tabs[i].kind {
+                        if sq.dirty && !sq.text.trim().is_empty() {
+                            sq.save_file();
+                        }
+                    }
+                }
+            }
+            self.close_tabs_of_project(&p.id);
+            self.sh.store.close_project(&p.id);
+            self.sh.save();
+            ui.close();
+        }
+        if ui.button("Excluir a pasta…").clicked() {
+            self.dialog = Some(Dialog::DeleteProject { id: p.id.clone(), msg: None });
+            ui.close();
+        }
     }
 
     fn scripts_node(&mut self, ui: &mut Ui) {
@@ -905,7 +1021,7 @@ impl App {
                     ui.close();
                 }
                 if ui.button("Abrir a pasta").clicked() {
-                    let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
+                    let _ = crate::shared::open_path(&dir);
                     ui.close();
                 }
                 if ui.button("Copiar o caminho").clicked() {
@@ -1532,5 +1648,21 @@ pub fn editable_source(kind: Kind, key: &str, schema: &str, name: &str, detail: 
     match drop_line {
         Some(d) => format!("{}{}\n\n{}\n", header, d, body),
         None => format!("{}{}\n", header, body),
+    }
+}
+
+/// Text of the Commit button: pending statements (transactions) and affected rows.
+pub fn commit_label(statements: usize, rows: u64) -> String {
+    format!("Commit · {} instr · {} reg", statements, rows)
+}
+
+#[cfg(test)]
+mod commit_label_tests {
+    use super::commit_label;
+
+    #[test]
+    fn label_shows_statements_and_rows() {
+        assert_eq!(commit_label(2, 5), "Commit · 2 instr · 5 reg");
+        assert_eq!(commit_label(0, 0), "Commit · 0 instr · 0 reg");
     }
 }

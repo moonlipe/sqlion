@@ -20,7 +20,9 @@ pub enum Dialog {
     ConfirmDelete(String),
     Password { conn: String, pass: String, remember: bool },
     ConfirmDisconnect { conn: String, reconnect: bool, rows: u64 },
-    Git { msg: String, output: String, avail: bool, repo: bool, branch: String, changed: usize },
+    Git { msg: String, output: String, avail: bool, repo: bool, branch: String, changed: usize, dir: std::path::PathBuf },
+    RenameProject { id: String, name: String, msg: Option<String> },
+    DeleteProject { id: String, msg: Option<String> },
     RenameScript { path: std::path::PathBuf, name: String, msg: Option<String> },
     DeleteScript(std::path::PathBuf),
     About,
@@ -67,6 +69,12 @@ impl App {
                     let pass = store::deobfuscate(&c.password);
                     self.dialog = Some(Dialog::Conn { cfg: Box::new(c), is_new: false, msg: None, pass });
                 }
+            }
+            Req::NewConnIn(project) => {
+                let mut c = ConnConfig::new(Kind::Sqlite);
+                c.project = project;
+                c.set_mode(TxMode::from_auto_commit(self.sh.store.prefs.default_auto_commit));
+                self.dialog = Some(Dialog::Conn { cfg: Box::new(c), is_new: true, msg: None, pass: String::new() });
             }
             Req::NewConn => {
                 let mut c = ConnConfig::new(Kind::Sqlite);
@@ -496,8 +504,8 @@ impl App {
                     });
                 });
             }
-            Dialog::Git { msg, output, avail, repo, branch, changed } => {
-                let dir = self.scripts_dir.clone();
+            Dialog::Git { msg, output, avail, repo, branch, changed, dir } => {
+                let dir = dir.clone();
                 let mut open = true;
                 let mut action: Option<u8> = None;
                 win(ctx, "Versionamento dos scripts (git)").open(&mut open).collapsible(false).default_width(560.0).show(ctx, |ui| {
@@ -508,7 +516,7 @@ impl App {
                             ui.ctx().copy_text(dir.display().to_string());
                         }
                         if ui.small_button("Abrir").clicked() {
-                            let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
+                            let _ = crate::shared::open_path(&dir);
                         }
                     });
                     ui.add_space(4.0);
@@ -594,6 +602,79 @@ impl App {
                 }
                 if !open {
                     keep = false;
+                }
+            }
+            Dialog::RenameProject { id, name, msg } => {
+                let mut open = true;
+                let mut go = false;
+                win(ctx, "Renomear projeto").open(&mut open).collapsible(false).show(ctx, |ui| {
+                    ui.add(egui::TextEdit::singleline(name).desired_width(300.0));
+                    if let Some(m) = msg {
+                        ui.colored_label(egui::Color32::from_rgb(210, 60, 60), m.as_str());
+                    }
+                    ui.horizontal(|ui| {
+                        go = ui.button("Renomear").clicked();
+                        if ui.button("Cancelar").clicked() {
+                            keep = false;
+                        }
+                    });
+                });
+                if go {
+                    match self.sh.store.rename_project(id, name) {
+                        Ok(_) => {
+                            self.sh.save();
+                            keep = false;
+                        }
+                        Err(e) => *msg = Some(e),
+                    }
+                }
+                if !open {
+                    keep = false;
+                }
+            }
+            Dialog::DeleteProject { id, msg } => {
+                let proj = self.sh.store.projects.iter().find(|p| &p.id == id).cloned();
+                let (nc, ns) = self.sh.store.project_counts(id);
+                let unsaved = self.tabs.iter().filter(|t| self.tab_in_project(t, id)).any(|t| match &t.kind {
+                    TabKind::Sql(s) => s.dirty,
+                    TabKind::Table(tt) => tt.grid.as_ref().map(|g| g.pending_changes() > 0).unwrap_or(false),
+                    _ => false,
+                });
+                win(ctx, "Excluir a pasta do projeto").collapsible(false).show(ctx, |ui| {
+                    match &proj {
+                        Some(p) => {
+                            ui.add(egui::Label::new(format!("Apagar do disco a pasta “{}” e tudo o que há nela?", p.path)).wrap());
+                            ui.label(format!("{} conexão(ões) e {} script(s) deixam de existir. Esta ação não pode ser desfeita.", nc, ns));
+                        }
+                        None => {
+                            ui.label("Projeto não encontrado.");
+                        }
+                    }
+                    if unsaved {
+                        ui.colored_label(egui::Color32::from_rgb(220, 150, 40), "Há abas deste projeto com alterações não gravadas; elas serão perdidas.");
+                    }
+                    if let Some(m) = msg.as_ref() {
+                        ui.colored_label(egui::Color32::from_rgb(210, 60, 60), m.as_str());
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancelar").clicked() {
+                            keep = false;
+                        }
+                        if proj.is_some() && ui.button("Excluir a pasta").clicked() {
+                            *msg = Some(String::new());
+                        }
+                    });
+                });
+                if msg.as_deref() == Some("") {
+                    *msg = None;
+                    self.close_tabs_of_project(id);
+                    match self.sh.store.delete_project_folder(id) {
+                        Ok(_) => {
+                            self.sh.save();
+                            keep = false;
+                        }
+                        Err(e) => *msg = Some(e),
+                    }
                 }
             }
             Dialog::DeleteScript(path) => {

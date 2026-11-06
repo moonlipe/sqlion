@@ -69,6 +69,7 @@ pub enum Req {
     ViewValue(String),
     EditConn(String),
     NewConn,
+    NewConnIn(String),
     DeleteConn(String),
     Params { tab: u64, names: Vec<String>, stmts: Vec<String>, new_tab: bool },
     ConfirmRun { tab: u64, stmts: Vec<String>, new_tab: bool, env: String },
@@ -522,4 +523,16 @@ mod tests {
         let _ = sh.connect(&id);
         assert!(sh.need_password.is_none());
     }
+}
+
+/// Opens a folder in the system file manager (Linux, macOS and Windows).
+pub fn open_path(path: &std::path::Path) {
+    let cmd = if cfg!(target_os = "windows") {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(cmd).arg(path).spawn();
 }

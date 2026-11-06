@@ -252,6 +252,50 @@ impl Store {
         self.script_conns.retain(|k, _| !k.starts_with(&format!("{}/", id)));
     }
 
+    /// Renames a project (name only; the folder and the connection ids stay).
+    pub fn rename_project(&mut self, id: &str, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("Informe o nome do projeto".into());
+        }
+        if self.projects.iter().any(|p| p.id != id && p.name.eq_ignore_ascii_case(name)) {
+            return Err("Já existe um projeto com esse nome".into());
+        }
+        let p = self.projects.iter_mut().find(|p| p.id == id).ok_or("Projeto não encontrado")?;
+        p.name = name.to_string();
+        let p = p.clone();
+        self.write_project(&p)
+    }
+
+    /// (connections, scripts) that live in the project.
+    pub fn project_counts(&self, id: &str) -> (usize, usize) {
+        let conns = self.connections.iter().filter(|c| c.project == id).count();
+        let scripts = self
+            .projects
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| std::fs::read_dir(p.scripts_dir()).map(|d| d.filter_map(|e| e.ok()).filter(|e| e.path().extension().map(|x| x == "sql").unwrap_or(false)).count()).unwrap_or(0))
+            .unwrap_or(0);
+        (conns, scripts)
+    }
+
+    /// Deletes the project folder from disk and closes the project. Refuses folders that are not projects, roots and the home folder.
+    pub fn delete_project_folder(&mut self, id: &str) -> Result<(), String> {
+        let p = self.projects.iter().find(|p| p.id == id).cloned().ok_or("Projeto não encontrado")?;
+        let dir = p.dir();
+        if !p.file().is_file() {
+            return Err("A pasta não tem o arquivo do projeto; nada foi apagado".into());
+        }
+        let canon = dir.canonicalize().map_err(|e| e.to_string())?;
+        let home = std::env::var_os("HOME").map(PathBuf::from).and_then(|h| h.canonicalize().ok());
+        if canon.parent().is_none() || home.as_ref().map(|h| h.starts_with(&canon)).unwrap_or(false) {
+            return Err("Por segurança, esta pasta não pode ser excluída".into());
+        }
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("Não foi possível excluir {}: {}", dir.display(), e))?;
+        self.close_project(id);
+        Ok(())
+    }
+
     /// Writes `sqlion-project.json`: connections without password, in a stable order (by id) so that diffs and merges stay readable.
     pub fn write_project(&self, p: &Project) -> Result<(), String> {
         let mut conns: Vec<ConnConfig> = self.connections.iter().filter(|c| c.project == p.id).cloned().collect();
@@ -474,6 +518,33 @@ mod tests {
         let e = s.open_project(&repo).unwrap_err();
         assert!(e.contains("99"), "{}", e);
         assert!(s.projects.is_empty() && s.connections.is_empty());
+    }
+
+    #[test]
+    fn rename_and_delete_project() {
+        let base = std::env::temp_dir().join(format!("dbr-test-pm-{}", new_project_id()));
+        let mut s = Store::memory();
+        let a = s.create_project("Alfa", &base.join("a")).unwrap();
+        let b = s.create_project("Beta", &base.join("b")).unwrap();
+        assert!(s.rename_project(&a.id, " ").is_err());
+        assert!(s.rename_project(&a.id, "beta").is_err(), "name already used");
+        s.rename_project(&a.id, "Gama").unwrap();
+        assert_eq!(s.projects.iter().find(|p| p.id == a.id).unwrap().name, "Gama");
+        let text = std::fs::read_to_string(a.file()).unwrap();
+        assert!(text.contains("\"Gama\""), "the name is written to the project file");
+        std::fs::write(a.scripts_dir().join("x.sql"), "select 1").unwrap();
+        assert_eq!(s.project_counts(&a.id), (0, 1));
+        // a folder without a project file is never deleted
+        let fake = Project { id: "proj-fake".into(), name: "F".into(), path: base.join("fake").to_string_lossy().to_string() };
+        std::fs::create_dir_all(&fake.path).unwrap();
+        s.projects.push(fake.clone());
+        assert!(s.delete_project_folder("proj-fake").is_err());
+        assert!(std::path::Path::new(&fake.path).exists());
+        s.projects.retain(|p| p.id != "proj-fake");
+        s.delete_project_folder(&a.id).unwrap();
+        assert!(!a.dir().exists());
+        assert!(s.projects.iter().all(|p| p.id != a.id) && s.projects.iter().any(|p| p.id == b.id));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

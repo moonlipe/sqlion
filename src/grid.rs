@@ -190,20 +190,32 @@ impl GridState {
             .filter(|&i| f.is_empty() || self.row_state[i] == RowState::New || self.qr.rows[i].iter().any(|v| v.as_ref().map(|s| s.to_lowercase().contains(&f)).unwrap_or(false)))
             .collect();
         if let (Some((c, asc)), false) = (self.sort, self.server_sort) {
+            // sort keys are computed once per row, not once per comparison
             let num = self.numeric.get(c).copied().unwrap_or(false);
-            idx.sort_by(|&a, &b| {
-                let (x, y) = (&self.qr.rows[a][c], &self.qr.rows[b][c]);
-                let o = match (x, y) {
-                    (None, None) => std::cmp::Ordering::Equal,
-                    (None, _) => std::cmp::Ordering::Less,
-                    (_, None) => std::cmp::Ordering::Greater,
-                    (Some(x), Some(y)) => {
-                        if num {
-                            x.parse::<f64>().unwrap_or(0.0).partial_cmp(&y.parse::<f64>().unwrap_or(0.0)).unwrap_or(std::cmp::Ordering::Equal)
-                        } else {
-                            x.to_lowercase().cmp(&y.to_lowercase())
-                        }
-                    }
+            enum Key {
+                Null,
+                Num(f64),
+                Text(String),
+            }
+            let keys: std::collections::HashMap<usize, Key> = idx
+                .iter()
+                .map(|&i| {
+                    let k = match &self.qr.rows[i][c] {
+                        None => Key::Null,
+                        Some(v) if num => Key::Num(v.parse::<f64>().unwrap_or(0.0)),
+                        Some(v) => Key::Text(v.to_lowercase()),
+                    };
+                    (i, k)
+                })
+                .collect();
+            idx.sort_by(|a, b| {
+                let o = match (&keys[a], &keys[b]) {
+                    (Key::Null, Key::Null) => std::cmp::Ordering::Equal,
+                    (Key::Null, _) => std::cmp::Ordering::Less,
+                    (_, Key::Null) => std::cmp::Ordering::Greater,
+                    (Key::Num(x), Key::Num(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+                    (Key::Text(x), Key::Text(y)) => x.cmp(y),
+                    _ => std::cmp::Ordering::Equal,
                 };
                 if asc {
                     o
@@ -616,32 +628,48 @@ fn looks_like_date(s: &str) -> bool {
 }
 
 
+const VP_MIN_PANEL: f32 = 180.0;
+const VP_MIN_GRID: f32 = 120.0;
+const VP_HANDLE: f32 = 6.0;
+
+/// Splits `full` into (grid, drag handle, value panel). Returns `None` when the area cannot hold both at their
+/// minimum sizes, so that no rectangle ever has a negative size.
+pub fn split_value_panel(full: egui::Rect, vp_width: f32) -> Option<(egui::Rect, egui::Rect, egui::Rect)> {
+    let (w, h) = (full.width(), full.height());
+    if !(w.is_finite() && h.is_finite()) || w < VP_MIN_GRID + VP_MIN_PANEL + VP_HANDLE || h < 60.0 {
+        return None;
+    }
+    let pw = vp_width.clamp(VP_MIN_PANEL, w - VP_MIN_GRID - VP_HANDLE);
+    let panel = egui::Rect::from_min_max(egui::pos2(full.right() - pw, full.top()), full.max);
+    let grid = egui::Rect::from_min_max(full.min, egui::pos2(full.right() - pw - VP_HANDLE, full.bottom()));
+    let handle = egui::Rect::from_min_max(egui::pos2(grid.right(), full.top()), egui::pos2(panel.left(), full.bottom()));
+    Some((grid, handle, panel))
+}
+
 pub fn show(ui: &mut Ui, g: &mut GridState, null_text: &str, value_panel: bool) -> Vec<GridAction> {
     let mut actions = Vec::new();
     if g.dirty {
         g.reindex();
     }
-    if value_panel && g.mode == ViewMode::Grid {
-        // the area is split by hand: the grid gets the left part and the panel the right part, so they never overlap
+    // the area is split by hand: the grid gets the left part and the panel the right part, so they never overlap;
+    // when the area is too small for both, the panel is left out instead of using negative sizes
+    let split = if value_panel && g.mode == ViewMode::Grid { split_value_panel(ui.available_rect_before_wrap(), g.vp_width) } else { None };
+    if let Some((grid_rect, handle, panel_rect)) = split {
         let pl = pal(ui.visuals().dark_mode);
         let full = ui.available_rect_before_wrap();
-        let w = g.vp_width.clamp(180.0, (full.width() - 200.0).max(180.0));
-        let panel_rect = egui::Rect::from_min_max(egui::pos2(full.right() - w, full.top()), full.max);
-        let grid_rect = egui::Rect::from_min_max(full.min, egui::pos2(full.right() - w - 6.0, full.bottom()));
-        // drag handle between the two
-        let handle = egui::Rect::from_min_max(egui::pos2(grid_rect.right(), full.top()), egui::pos2(panel_rect.left(), full.bottom()));
         let hr = ui.interact(handle, egui::Id::new(("vp_handle", g.uid)), Sense::drag());
         if hr.hovered() || hr.dragged() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         }
         if hr.dragged() {
-            g.vp_width = (g.vp_width - hr.drag_delta().x).clamp(180.0, 520.0);
+            g.vp_width = (g.vp_width - hr.drag_delta().x).clamp(VP_MIN_PANEL, 520.0);
         }
+        let _ = full;
         let frame = egui::Frame::new().fill(pl.panel).stroke(Stroke::new(1.0, pl.border)).inner_margin(egui::Margin::same(10)).corner_radius(CornerRadius::same(6));
         ui.scope_builder(egui::UiBuilder::new().max_rect(panel_rect), |ui| {
             frame.show(ui, |ui| {
-                ui.set_min_size(egui::vec2(panel_rect.width() - 22.0, panel_rect.height() - 22.0));
-                egui::ScrollArea::vertical().id_salt("vp_all").auto_shrink([false, false]).show(ui, |ui| value_panel_ui(ui, g, &mut actions, panel_rect.width() - 24.0));
+                ui.set_min_size(egui::vec2((panel_rect.width() - 22.0).max(0.0), (panel_rect.height() - 22.0).max(0.0)));
+                egui::ScrollArea::vertical().id_salt("vp_all").auto_shrink([false, false]).show(ui, |ui| value_panel_ui(ui, g, &mut actions, (panel_rect.width() - 24.0).max(0.0)));
             });
         });
         ui.scope_builder(egui::UiBuilder::new().max_rect(grid_rect), |ui| show_grid(ui, g, null_text, &mut actions));
@@ -744,7 +772,7 @@ fn value_panel_ui(ui: &mut Ui, g: &mut GridState, actions: &mut Vec<GridAction>,
 
 fn show_text(ui: &mut Ui, g: &GridState) {
     let opts = crate::export::ExportOptions { format: crate::export::Format::Txt, show_nulls: true, ..Default::default() };
-    let mut sub = g.qr.clone();
+    let mut sub = QueryResult { columns: g.qr.columns.clone(), ..Default::default() };
     let cut = crate::constants::TEXT_MAX_COLUMN_SIZE;
     sub.rows = g.view_idx.iter().map(|&i| g.qr.rows[i].iter().map(|v| v.as_ref().map(|s| if s.chars().count() > cut { s.chars().take(cut).collect::<String>() } else { s.clone() })).collect()).collect();
     let mut t = crate::export::render(&sub, &opts, crate::db::Kind::Sqlite);
@@ -775,6 +803,27 @@ fn show_record(ui: &mut Ui, g: &mut GridState, null_text: &str) {
             }
         });
     });
+}
+
+/// Longest text a grid cell lays out; the full value stays in the data and in the value panel.
+const CELL_DISPLAY_CHARS: usize = 300;
+
+/// Text drawn in a cell: newlines and tabs flattened, cut to `CELL_DISPLAY_CHARS` before layout so that
+/// huge values (JSON, text blobs) are not copied, hashed and laid out in full on every frame.
+fn cell_display_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len().min(CELL_DISPLAY_CHARS + 4));
+    for (n, ch) in s.chars().enumerate() {
+        if n >= CELL_DISPLAY_CHARS {
+            out.push('…');
+            break;
+        }
+        out.push(match ch {
+            '\n' => '¶',
+            '\t' => ' ',
+            c => c,
+        });
+    }
+    out
 }
 
 /// The table only scrolls vertically by itself: the horizontal scroll bar comes from this wrapper.
@@ -1013,7 +1062,7 @@ fn show_grid_table(ui: &mut Ui, g: &mut GridState, null_text: &str, actions: &mu
                         }
                         let text = match v {
                             Some(s) => {
-                                let t: String = s.replace('\n', "¶").replace('\t', " ");
+                                let t: String = cell_display_text(s);
                                 let mut rt = RichText::new(t);
                                 if g.numeric[c] {
                                     rt = rt.color(pl.number);
@@ -1453,6 +1502,99 @@ mod tests {
         frame(&ctx, &mut g, vec![key(Key::Z, Modifiers::COMMAND)], t);
         assert_eq!(g.qr.rows[0][0].as_deref(), Some("1"));
         assert_eq!(g.pending_changes(), 0);
+    }
+
+    fn rss_kb() -> usize {
+        std::fs::read_to_string("/proc/self/statm").ok().and_then(|t| t.split_whitespace().nth(1).and_then(|v| v.parse::<usize>().ok())).unwrap_or(0) * 4
+    }
+
+    fn wide_rows(from: usize, n: usize) -> Vec<Vec<Option<String>>> {
+        (from..from + n).map(|i| (0..12).map(|c| Some(if c == 5 { format!("{{\"id\":{},\"text\":\"{}\"}}", i, "lorem ipsum ".repeat(2000)) } else { format!("valor-{}-{}", i, c) })).collect()).collect()
+    }
+
+    /// Benchmark, run by hand: `cargo test measure_memory -- --ignored --nocapture`.
+    /// Pages 200 -> 400 rows with ~24 kB values and scrolls the grid; RSS must stay flat once the page is loaded.
+    #[test]
+    #[ignore]
+    fn measure_memory_while_paging() {
+        let ctx = egui::Context::default();
+        let qr = QueryResult { columns: (0..12).map(|c| format!("col{}", c)).collect(), rows: wide_rows(0, 200), has_more: true, ..Default::default() };
+        let mut g = GridState::new(qr, "t");
+        let mut t = 0.0;
+        let mut last = 0;
+        for step in 0..6 {
+            let before = rss_kb();
+            for r in (0..g.qr.rows.len()).step_by(5) {
+                t += 0.02;
+                let dy = if (r / 100) % 2 == 0 { -150.0 } else { 150.0 };
+                let ev = vec![Event::PointerMoved(Pos2::new(300.0, 300.0)), Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, dy), phase: egui::TouchPhase::Move, modifiers: Modifiers::NONE }];
+                frame(&ctx, &mut g, ev, t);
+            }
+            last = rss_kb();
+            eprintln!("rows={} rss {} -> {} kB", g.qr.rows.len(), before, last);
+            if step == 0 {
+                let more = wide_rows(g.qr.rows.len(), 200);
+                let added = more.len();
+                g.qr.rows.extend(more);
+                g.row_state.extend(std::iter::repeat(RowState::Clean).take(added));
+                g.dirty = true;
+            }
+        }
+        let _ = last;
+    }
+
+    #[test]
+    fn sorting_uses_keys_computed_once() {
+        let qr = QueryResult { columns: vec!["a".into(), "b".into()], rows: vec![vec![Some("10".into()), Some("b".into())], vec![Some("9".into()), None], vec![None, Some("A".into())], vec![Some("100".into()), Some("c".into())]], ..Default::default() };
+        let mut g = GridState::new(qr, "t");
+        g.server_sort = false;
+        g.sort = Some((0, true));
+        g.reindex();
+        assert_eq!(g.view_idx, vec![2, 1, 0, 3], "NULL first, then numeric order");
+        g.sort = Some((1, false));
+        g.reindex();
+        assert_eq!(g.view_idx, vec![3, 0, 2, 1], "text descending, case-insensitive, NULL last");
+    }
+
+    #[test]
+    fn cell_text_is_cut_before_layout() {
+        assert_eq!(cell_display_text("a\nb\tc"), "a¶b c");
+        let long = "é".repeat(5000);
+        let t = cell_display_text(&long);
+        assert_eq!(t.chars().count(), CELL_DISPLAY_CHARS + 1);
+        assert!(t.ends_with('…'));
+        assert_eq!(cell_display_text(&"x".repeat(CELL_DISPLAY_CHARS)).chars().count(), CELL_DISPLAY_CHARS);
+    }
+
+    #[test]
+    fn value_panel_split_never_has_negative_sizes() {
+        for (w, h) in [(0.0, 0.0), (-5.0, 10.0), (100.0, 400.0), (300.0, 400.0), (305.0, 400.0), (306.0, 400.0), (400.0, 30.0), (900.0, 500.0), (f32::NAN, 100.0)] {
+            let full = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(w, h));
+            if let Some((g, hd, p)) = split_value_panel(full, 520.0) {
+                for r in [g, hd, p] {
+                    assert!(r.width() >= 0.0 && r.height() >= 0.0, "{:?} for {}x{}", r, w, h);
+                }
+                assert!(g.width() >= VP_MIN_GRID - 0.01 && p.width() >= VP_MIN_PANEL - 0.01);
+            } else {
+                assert!(!(w >= 306.0 && h >= 60.0), "{}x{} must fit", w, h);
+            }
+        }
+    }
+
+    #[test]
+    fn grid_with_value_panel_survives_tiny_areas() {
+        let ctx = egui::Context::default();
+        let mut g = grid();
+        g.sel = Some((0, 0));
+        let sizes = [(0.0f32, 0.0f32), (1.0, 1.0), (50.0, 30.0), (200.0, 100.0), (320.0, 200.0), (900.0, 500.0)];
+        for (i, ((w, h), (panel, mode))) in sizes.into_iter().flat_map(|sz| [(sz, (true, ViewMode::Grid)), (sz, (false, ViewMode::Grid)), (sz, (false, ViewMode::Text)), (sz, (false, ViewMode::Record))]).enumerate() {
+            g.mode = mode;
+            let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(w, h))), time: Some(i as f64 * 0.05), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| {
+                show(ui, &mut g, "NULL", panel);
+            });
+            out.textures_delta.clear();
+        }
     }
 
     #[test]
