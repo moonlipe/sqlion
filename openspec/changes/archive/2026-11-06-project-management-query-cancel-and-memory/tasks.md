@@ -23,8 +23,8 @@
 
 ## 5. Projetos e pastas
 
-- [ ] 5.1 Diálogos Novo projeto e Abrir projeto (Arquivo, botão `+` do navegador, tela vazia), com validação de pasta; verificar com testes sobre pastas temporárias (nova, existente, já projeto, sem permissão, sem arquivo de projeto) e captura de tela.
-- [ ] 5.2 Nó "Projeto padrão" na árvore com o menu de projeto sem as ações destrutivas; verificar com teste de que Remover/Excluir/Renomear ficam desabilitados e captura de tela.
+- [x] 5.1 Diálogos Novo projeto e Abrir projeto (Arquivo, botão `+` do navegador, tela vazia), com validação de pasta; verificar com testes sobre pastas temporárias (nova, existente, já projeto, sem permissão, sem arquivo de projeto) e captura de tela.
+- [x] 5.2 Nó "Projeto padrão" na árvore com o menu de projeto sem as ações destrutivas; verificar com teste de que Remover/Excluir/Renomear ficam desabilitados e captura de tela.
 - [x] 5.3 Converter o projeto padrão em projeto de pasta (cópia, troca de vínculos, remoção só no fim); verificar com testes de sucesso, de falha no meio (padrão intacto) e do vínculo script→conexão.
 - [x] 5.4 Mover conexão entre projetos (menu da conexão), preservando id, senha local e vínculo de scripts; verificar com teste de ida e volta e de que os dois arquivos de projeto ficam corretos.
 - [x] 5.5 Pastas de organização: campo `folders` no projeto (e no padrão), Nova pasta, Renomear, Excluir (conexões vão para a raiz) e mover conexão para pasta; verificar com testes de formato antigo sem `folders` e de excluir com conexões.
@@ -33,8 +33,8 @@
 ## 6. Scripts vinculados ou soltos
 
 - [x] 6.1 `next_script_path` com destino (projeto selecionado → projeto da conexão → solto), menu "Novo script em…" e título com o vínculo; verificar com testes de cada origem de contexto.
-- [ ] 6.2 Árvore com scripts sob o projeto e nó "Scripts soltos"; verificar por captura de tela e teste de listagem por projeto.
-- [ ] 6.3 Mover script entre projeto e soltos pelo menu, atualizando aba aberta e `script_conns`, e recusando nome em conflito; verificar com testes de mover, conflito e aba aberta.
+- [x] 6.2 Árvore com scripts sob o projeto e nó "Scripts soltos"; verificar por captura de tela e teste de listagem por projeto.
+- [x] 6.3 Mover script entre projeto e soltos pelo menu, atualizando aba aberta e `script_conns`, e recusando nome em conflito; verificar com testes de mover, conflito e aba aberta.
 
 ## 7. Arrastar e soltar
 
@@ -42,4 +42,4 @@
 
 ## 8. Integração
 
-- [ ] 8.1 Rodar `cargo test` e `cargo build --release` e percorrer manualmente os cenários das specs (criar/abrir/converter projeto, fechar última aba, cancelar consulta longa em cada banco disponível, memória após fechar scripts, aviso de Auto); anotar o que ficou de fora e marcar 4.4–4.6 de `add-projects-and-workspace-polish` como absorvidas.
+- [x] 8.1 Rodar `cargo test` e `cargo build --release` e percorrer manualmente os cenários das specs (criar/abrir/converter projeto, fechar última aba, cancelar consulta longa em cada banco disponível, memória após fechar scripts, aviso de Auto); anotar o que ficou de fora e marcar 4.4–4.6 de `add-projects-and-workspace-polish` como absorvidas.
