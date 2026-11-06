@@ -29,18 +29,84 @@ pub struct Job {
     pub total: usize,
     pub done: usize,
     pub started: Instant,
+    pub cancel: Arc<CancelState>,
+}
+
+/// Cancellation shared between the UI and the thread that runs a job.
+#[derive(Default)]
+pub struct CancelState {
+    requested: std::sync::atomic::AtomicBool,
+    reason: Mutex<String>,
+    target: Mutex<Option<Arc<crate::db::CancelTarget>>>,
+}
+
+impl CancelState {
+    pub fn requested(&self) -> bool {
+        self.requested.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn reason(&self) -> String {
+        self.reason.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Asks the job to stop: remaining statements are skipped and the running one is interrupted on the server.
+    /// Returns false when the driver cannot interrupt a statement (the caller should stop waiting for it).
+    pub fn cancel(&self, reason: &str) -> Result<bool, String> {
+        {
+            let mut r = self.reason.lock().unwrap_or_else(|e| e.into_inner());
+            if r.is_empty() {
+                *r = reason.to_string();
+            }
+        }
+        self.requested.store(true, std::sync::atomic::Ordering::SeqCst);
+        let target = self.target.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        match target {
+            Some(t) => t.fire().map(|_| t.interrupts()),
+            None => Ok(true),
+        }
+    }
+}
+
+impl Job {
+    pub fn cancel(&self, reason: &str) -> Result<bool, String> {
+        self.cancel.cancel(reason)
+    }
+
+    pub fn cancel_requested(&self) -> bool {
+        self.cancel.requested()
+    }
+}
+
+pub fn cancelled_message(reason: &str) -> String {
+    if reason.is_empty() {
+        "Consulta cancelada".to_string()
+    } else {
+        format!("Consulta cancelada: {}", reason)
+    }
 }
 
 pub fn spawn_job(sess: Arc<Mutex<Session>>, stmts: Vec<JobStmt>, ctx: egui::Context) -> Job {
     let (tx, rx) = channel();
     let total = stmts.len();
+    let cancel = Arc::new(CancelState::default());
+    let state = cancel.clone();
     std::thread::spawn(move || {
         {
         let mut s = sess.lock().unwrap_or_else(|e| e.into_inner());
+        *state.target.lock().unwrap_or_else(|e| e.into_inner()) = Some(s.cancel.clone());
         for st in stmts {
+            if state.requested() {
+                let _ = tx.send(JobMsg::Item(JobItem { sql: st.sql, res: Err(cancelled_message(&state.reason())), tag: st.tag }));
+                break;
+            }
             let mut r = s.run(&st.sql, st.limit, st.offset).map_err(|e| e.to_string());
+            // a cancelled statement is not a failure of the transaction: it stays open for Commit or Rollback
+            let cancelled = state.requested() && r.is_err();
+            if cancelled {
+                r = Err(cancelled_message(&state.reason()));
+            }
             let failed = r.is_err();
-            if failed && crate::constants::SCRIPT_ERROR_STOP_ROLLBACK && !s.auto_commit() && s.tx_open {
+            if failed && !cancelled && crate::constants::SCRIPT_ERROR_STOP_ROLLBACK && !s.auto_commit() && s.tx_open {
                 // SCRIPT_ERROR_HANDLING = STOP_ROLLBACK
                 if s.rollback().is_ok() {
                     r = r.map_err(|e| format!("{}\n(a transação foi revertida)", e));
@@ -56,7 +122,7 @@ pub fn spawn_job(sess: Arc<Mutex<Session>>, stmts: Vec<JobStmt>, ctx: egui::Cont
         let _ = tx.send(JobMsg::Finished);
         ctx.request_repaint();
     });
-    Job { rx, total, done: 0, started: Instant::now() }
+    Job { rx, total, done: 0, started: Instant::now(), cancel }
 }
 
 pub enum Req {
@@ -151,8 +217,9 @@ impl Shared {
     /// Remembers that the script (identified by its file name) ran on `conn`.
     pub fn remember_script_conn(&mut self, file: Option<&std::path::Path>, conn: &str) {
         self.store.last_exec_conn = Some(conn.to_string());
-        if let Some(name) = file.and_then(|f| f.file_name()).map(|n| n.to_string_lossy().to_string()) {
-            self.store.script_conns.insert(name, conn.to_string());
+        if let Some(f) = file {
+            let key = self.store.script_key(f);
+            self.store.script_conns.insert(key, conn.to_string());
         }
         self.save();
     }
@@ -450,6 +517,163 @@ mod tests {
         assert_eq!((mode, open, n, rows), (crate::db::TxMode::Smart, true, 1, 3));
     }
 
+    fn sqlite_shared(name: &str, mode: crate::db::TxMode) -> (Shared, String) {
+        let p = std::env::temp_dir().join(format!("dbr-test-{}.sqlite", name));
+        crate::sample::create(&p).unwrap();
+        let mut c = ConnConfig::new(Kind::Sqlite);
+        c.database = p.to_string_lossy().to_string();
+        c.set_mode(mode);
+        let id = c.id.clone();
+        let mut sh = Shared::new(crate::store::Store::memory(), false, egui::Context::default());
+        sh.store.connections.push(c);
+        sh.connect(&id).unwrap();
+        (sh, id)
+    }
+
+    const SLOW_SQL: &str = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 2000000000) SELECT count(*) FROM c";
+
+    fn wait_finished(job: &Job) -> Vec<JobItem> {
+        let mut items = Vec::new();
+        loop {
+            match job.rx.recv_timeout(std::time::Duration::from_secs(20)).expect("the job must finish after the cancel") {
+                JobMsg::Item(i) => items.push(i),
+                JobMsg::Finished => return items,
+            }
+        }
+    }
+
+    fn rss_mb() -> usize {
+        std::fs::read_to_string("/proc/self/statm").ok().and_then(|t| t.split_whitespace().nth(1).and_then(|v| v.parse::<usize>().ok())).unwrap_or(0) * 4 / 1024
+    }
+
+    /// Benchmark, run by hand: `cargo test measure_memory_across -- --ignored --nocapture`.
+    /// Runs big queries one after another, each on a fresh job thread (as the app does), keeps three results like open
+    /// tabs, then drops everything: RSS should come back close to where it started.
+    #[test]
+    #[ignore]
+    fn measure_memory_across_queries() {
+        let (mut sh, id) = sqlite_shared("mem", crate::db::TxMode::Auto);
+        let sess = sh.session(&id).unwrap();
+        let sql = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 200) SELECT x, hex(randomblob(100000)) AS big FROM c";
+        let base = rss_mb();
+        let mut held: Vec<crate::grid::GridState> = Vec::new();
+        for i in 0..20 {
+            let job = spawn_job(sess.clone(), vec![JobStmt { sql: sql.into(), limit: 200, offset: 0, tag: 0 }], egui::Context::default());
+            for it in wait_finished(&job) {
+                held.push(crate::grid::GridState::new(it.res.unwrap(), "t"));
+            }
+            if held.len() > 3 {
+                held.remove(0);
+            }
+            if i % 5 == 4 {
+                eprintln!("after query {:>2}: rss {} MB (base {} MB, holding {})", i + 1, rss_mb(), base, held.len());
+            }
+        }
+        drop(held);
+        eprintln!("after dropping every result: rss {} MB (base {} MB)", rss_mb(), base);
+        release_memory();
+        eprintln!("after release_memory(): rss {} MB", rss_mb());
+    }
+
+    #[test]
+    fn cancelling_a_long_query_frees_the_session() {
+        let (mut sh, id) = sqlite_shared("cancel", crate::db::TxMode::Auto);
+        let sess = sh.session(&id).unwrap();
+        let stmts = vec![
+            JobStmt { sql: SLOW_SQL.into(), limit: 0, offset: 0, tag: 0 },
+            JobStmt { sql: "SELECT 1".into(), limit: 0, offset: 0, tag: 0 },
+        ];
+        let job = spawn_job(sess.clone(), stmts, egui::Context::default());
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let t = std::time::Instant::now();
+        assert_eq!(job.cancel("").unwrap(), true);
+        let items = wait_finished(&job);
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "interrupted promptly");
+        assert_eq!(items.len(), 1, "the remaining statement is not run");
+        assert_eq!(items[0].res.as_ref().err().map(|s| s.as_str()), Some("Consulta cancelada"));
+        // the same session accepts a new query
+        let r = sess.lock().unwrap().run("SELECT 42", 0, 0).unwrap();
+        assert_eq!(r.rows[0][0].as_deref(), Some("42"));
+    }
+
+    /// Server tests: DBR_PG_PORT / DBR_MYSQL_PORT (and *_PASS) point at a running server, otherwise they return at once.
+    fn server_cancel(kind: Kind, host: String, port: Option<u16>, user: &str, pass: &str, sleep_sql: &str) {
+        let mut c = ConnConfig::new(kind);
+        c.host = host;
+        if let Some(p) = port {
+            c.port = p;
+        }
+        c.user = user.into();
+        c.password = crate::store::obfuscate(pass);
+        c.set_mode(crate::db::TxMode::Auto);
+        let id = c.id.clone();
+        let mut sh = Shared::new(crate::store::Store::memory(), false, egui::Context::default());
+        sh.store.connections.push(c);
+        sh.connect(&id).unwrap_or_else(|e| panic!("connect: {}", e));
+        let sess = sh.session(&id).unwrap();
+        let stmts = vec![
+            JobStmt { sql: sleep_sql.into(), limit: 0, offset: 0, tag: 0 },
+            JobStmt { sql: "SELECT 1".into(), limit: 0, offset: 0, tag: 0 },
+        ];
+        let job = spawn_job(sess.clone(), stmts, egui::Context::default());
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let t = std::time::Instant::now();
+        assert!(job.cancel("").unwrap());
+        let items = wait_finished(&job);
+        assert!(t.elapsed() < std::time::Duration::from_secs(10), "interrupted promptly");
+        // MySQL answers an interrupted SLEEP with a normal result, so the cancelled marker may be the second item
+        assert!(items.len() <= 2 && items.last().unwrap().res.is_err(), "the remaining statement is not run");
+        let r = sess.lock().unwrap().run("SELECT 42", 0, 0).unwrap();
+        assert_eq!(r.rows[0][0].as_deref(), Some("42"), "the session is usable again");
+    }
+
+    #[test]
+    fn cancel_postgres_query() {
+        let Ok(port) = std::env::var("DBR_PG_PORT") else { return };
+        server_cancel(Kind::Postgres, format!("localhost:{}", port), None, "postgres", &std::env::var("DBR_PG_PASS").unwrap_or_default(), "SELECT pg_sleep(60)");
+    }
+
+    #[test]
+    fn cancel_mysql_query() {
+        let Ok(port) = std::env::var("DBR_MYSQL_PORT") else { return };
+        server_cancel(Kind::Mysql, format!("localhost:{}", port), None, &std::env::var("DBR_MYSQL_USER").unwrap_or_else(|_| "root".into()), &std::env::var("DBR_MYSQL_PASS").unwrap_or_default(), "SELECT SLEEP(60)");
+    }
+
+    #[test]
+    fn cancel_sql_server_query() {
+        let Ok(port) = std::env::var("DBR_MS_PORT") else { return };
+        server_cancel(Kind::SqlServer, "localhost".into(), port.parse().ok(), "sa", &std::env::var("DBR_MS_PASS").unwrap_or_default(), "WAITFOR DELAY '00:01:00'");
+    }
+
+    #[test]
+    fn cancelling_keeps_the_transaction_open_in_manual_mode() {
+        let (mut sh, id) = sqlite_shared("cancel_tx", crate::db::TxMode::Manual);
+        let sess = sh.session(&id).unwrap();
+        sess.lock().unwrap().run("UPDATE products SET in_stock = 1 WHERE product_id <= 2", 0, 0).unwrap();
+        let job = spawn_job(sess.clone(), vec![JobStmt { sql: SLOW_SQL.into(), limit: 0, offset: 0, tag: 0 }], egui::Context::default());
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        job.cancel("limite de 1 s atingido").unwrap();
+        let items = wait_finished(&job);
+        assert_eq!(items[0].res.as_ref().err().map(|s| s.as_str()), Some("Consulta cancelada: limite de 1 s atingido"));
+        let (_, open, n, _) = sh.tx_info(&id).unwrap();
+        assert!(open, "the transaction is still open");
+        assert_eq!(n, 1, "the earlier update is still pending");
+        sess.lock().unwrap().rollback().unwrap();
+    }
+
+    #[test]
+    fn cancel_before_the_job_gets_the_session_skips_everything() {
+        let (mut sh, id) = sqlite_shared("cancel_early", crate::db::TxMode::Auto);
+        let sess = sh.session(&id).unwrap();
+        let guard = sess.lock().unwrap();
+        let job = spawn_job(sess.clone(), vec![JobStmt { sql: "SELECT 1".into(), limit: 0, offset: 0, tag: 0 }], egui::Context::default());
+        job.cancel("").unwrap();
+        drop(guard);
+        let items = wait_finished(&job);
+        assert_eq!(items.len(), 1);
+        assert!(items[0].res.is_err());
+    }
+
     #[test]
     fn reconnect_replaces_the_session_and_clears_caches() {
         let p = std::env::temp_dir().join("dbr-test-reconnect.sqlite");
@@ -535,4 +759,21 @@ pub fn open_path(path: &std::path::Path) {
         "xdg-open"
     };
     let _ = std::process::Command::new(cmd).arg(path).spawn();
+}
+
+/// Gives freed memory back to the operating system.
+///
+/// glibc keeps the memory of dropped results (especially from the job threads' own arenas) in its free lists, so the
+/// process stays at its peak size after tabs are closed. Other platforms return memory on their own.
+pub fn release_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // SAFETY: plain glibc call with no pointers
+        unsafe {
+            malloc_trim(0);
+        }
+    }
 }

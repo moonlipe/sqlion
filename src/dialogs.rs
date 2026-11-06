@@ -21,6 +21,11 @@ pub enum Dialog {
     Password { conn: String, pass: String, remember: bool },
     ConfirmDisconnect { conn: String, reconnect: bool, rows: u64 },
     Git { msg: String, output: String, avail: bool, repo: bool, branch: String, changed: usize, dir: std::path::PathBuf },
+    NewProject { name: String, dir: String, dir_edited: bool, msg: Option<String> },
+    OpenProject { dir: String, msg: Option<String> },
+    ConvertDefault { name: String, dir: String, dir_edited: bool, msg: Option<String> },
+    Folder { project: String, old: Option<String>, name: String, msg: Option<String> },
+    ConfirmAutoCommit { conn: String, stmts: usize, rows: u64, dont_ask: bool },
     RenameProject { id: String, name: String, msg: Option<String> },
     DeleteProject { id: String, msg: Option<String> },
     RenameScript { path: std::path::PathBuf, name: String, msg: Option<String> },
@@ -163,6 +168,11 @@ impl App {
                         });
                         if m != cfg.mode() {
                             cfg.set_mode(m);
+                        }
+                        if cfg.mode() == TxMode::Auto {
+                            ui.end_row();
+                            ui.label("");
+                            ui.label(egui::RichText::new("Auto: cada instrução é confirmada na hora, sem Rollback.").small().color(egui::Color32::from_rgb(220, 150, 40)));
                         }
                         ui.end_row();
                         ui.label("Segurança");
@@ -604,6 +614,164 @@ impl App {
                     keep = false;
                 }
             }
+            Dialog::NewProject { name, dir, dir_edited, msg } => {
+                let mut open = true;
+                let mut go = false;
+                win(ctx, "Novo projeto").open(&mut open).collapsible(false).show(ctx, |ui| {
+                    project_form(ui, name, dir, dir_edited, msg.as_deref(), "Um projeto é uma pasta com as conexões (sem senhas) e os scripts, pronta para versionar com git.");
+                    ui.horizontal(|ui| {
+                        go = ui.button("Criar projeto").clicked();
+                        if ui.button("Cancelar").clicked() {
+                            keep = false;
+                        }
+                    });
+                });
+                if go {
+                    match self.sh.store.create_project(name, std::path::Path::new(dir.trim())) {
+                        Ok(_) => {
+                            self.sh.save();
+                            self.toast("Projeto criado");
+                            keep = false;
+                        }
+                        Err(e) => *msg = Some(e),
+                    }
+                }
+                if !open {
+                    keep = false;
+                }
+            }
+            Dialog::OpenProject { dir, msg } => {
+                let mut open = true;
+                let mut go = false;
+                win(ctx, "Abrir projeto").open(&mut open).collapsible(false).show(ctx, |ui| {
+                    ui.add(egui::Label::new("Pasta de um projeto existente ou clonado do git (a que contém sqlion-project.json).").wrap());
+                    ui.add(egui::TextEdit::singleline(dir).hint_text("/caminho/da/pasta").desired_width(380.0));
+                    if let Some(m) = msg.as_ref() {
+                        ui.colored_label(egui::Color32::from_rgb(210, 60, 60), m.as_str());
+                    }
+                    ui.horizontal(|ui| {
+                        go = ui.button("Abrir").clicked();
+                        if ui.button("Cancelar").clicked() {
+                            keep = false;
+                        }
+                    });
+                });
+                if go {
+                    let d = std::path::PathBuf::from(dir.trim());
+                    if dir.trim().is_empty() {
+                        *msg = Some("Informe a pasta do projeto".into());
+                    } else if !d.join(store::PROJECT_FILE).is_file() {
+                        *msg = Some(format!("A pasta não tem {}; use Novo projeto para criar um projeto nela", store::PROJECT_FILE));
+                    } else {
+                        match self.sh.store.open_project(&d) {
+                            Ok(_) => {
+                                self.sh.save();
+                                self.toast("Projeto aberto");
+                                keep = false;
+                            }
+                            Err(e) => *msg = Some(e),
+                        }
+                    }
+                }
+                if !open {
+                    keep = false;
+                }
+            }
+            Dialog::ConvertDefault { name, dir, dir_edited, msg } => {
+                let mut open = true;
+                let mut go = false;
+                win(ctx, "Converter o projeto padrão").open(&mut open).collapsible(false).show(ctx, |ui| {
+                    project_form(ui, name, dir, dir_edited, msg.as_deref(), "As conexões e os scripts do projeto padrão são copiados para a pasta; os arquivos originais só são removidos depois que tudo foi gravado. Senhas continuam apenas neste computador.");
+                    ui.horizontal(|ui| {
+                        go = ui.button("Converter").clicked();
+                        if ui.button("Cancelar").clicked() {
+                            keep = false;
+                        }
+                    });
+                });
+                if go {
+                    self.save_loose_scripts();
+                    let old_dir = self.scripts_dir.clone();
+                    match self.sh.store.convert_default_project(name, std::path::Path::new(dir.trim()), &old_dir) {
+                        Ok(p) => {
+                            self.relink_tabs_after_convert(&old_dir, &p.scripts_dir());
+                            self.sh.save();
+                            self.toast(format!("Projeto padrão convertido em “{}”", p.name));
+                            keep = false;
+                        }
+                        Err(e) => *msg = Some(e),
+                    }
+                }
+                if !open {
+                    keep = false;
+                }
+            }
+            Dialog::Folder { project, old, name, msg } => {
+                let mut open = true;
+                let mut go = false;
+                let title = if old.is_some() { "Renomear pasta" } else { "Nova pasta" };
+                win(ctx, title).open(&mut open).collapsible(false).show(ctx, |ui| {
+                    ui.add(egui::TextEdit::singleline(name).desired_width(300.0));
+                    if let Some(m) = msg.as_ref() {
+                        ui.colored_label(egui::Color32::from_rgb(210, 60, 60), m.as_str());
+                    }
+                    ui.horizontal(|ui| {
+                        go = ui.button(if old.is_some() { "Renomear" } else { "Criar" }).clicked();
+                        if ui.button("Cancelar").clicked() {
+                            keep = false;
+                        }
+                    });
+                });
+                if go {
+                    let r = match old {
+                        Some(o) => self.sh.store.rename_folder(project, o, name),
+                        None => self.sh.store.add_folder(project, name),
+                    };
+                    match r {
+                        Ok(_) => {
+                            self.sh.save();
+                            keep = false;
+                        }
+                        Err(e) => *msg = Some(e),
+                    }
+                }
+                if !open {
+                    keep = false;
+                }
+            }
+            Dialog::ConfirmAutoCommit { conn, stmts, rows, dont_ask } => {
+                let name = self.sh.conn_name(conn);
+                let mut choice: Option<bool> = None;
+                win(ctx, format!("Mudar {} para Auto commit?", name)).collapsible(false).show(ctx, |ui| {
+                    ui.add(egui::Label::new("No modo Auto cada instrução é confirmada (commit) imediatamente e não pode ser desfeita com Rollback.").wrap());
+                    if *stmts > 0 || *rows > 0 {
+                        ui.add_space(4.0);
+                        ui.colored_label(egui::Color32::from_rgb(220, 150, 40), format!("Há {} instrução(ões) pendente(s) afetando {} registro(s): serão confirmadas agora, antes da troca.", stmts, rows));
+                    } else {
+                        ui.checkbox(dont_ask, "Não perguntar de novo (só quando não há pendências)");
+                    }
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Mudar para Auto").clicked() {
+                            choice = Some(true);
+                        }
+                        if ui.button("Cancelar").clicked() {
+                            choice = Some(false);
+                        }
+                    });
+                });
+                if let Some(ok) = choice {
+                    keep = false;
+                    if ok {
+                        if *dont_ask && *stmts == 0 && *rows == 0 {
+                            self.sh.store.prefs.confirm_auto_commit = false;
+                            self.sh.save();
+                        }
+                        let c = conn.clone();
+                        self.set_tx_mode_of(&c, crate::db::TxMode::Auto);
+                    }
+                }
+            }
             Dialog::RenameProject { id, name, msg } => {
                 let mut open = true;
                 let mut go = false;
@@ -713,8 +881,21 @@ impl App {
                         ui.add(egui::DragValue::new(&mut n).range(1..=1_000_000));
                         p.max_rows = n as usize;
                         ui.end_row();
+                        ui.label("Tempo limite das consultas (s, 0 = sem limite)");
+                        let mut qt = p.query_timeout_secs;
+                        ui.add(egui::DragValue::new(&mut qt).range(0..=86_400));
+                        p.query_timeout_secs = qt;
+                        ui.end_row();
                         ui.label("Auto-commit em novas conexões");
                         ui.checkbox(&mut p.default_auto_commit, "");
+                        ui.end_row();
+                        if p.default_auto_commit {
+                            ui.label("");
+                            ui.label(egui::RichText::new("Novas conexões confirmam cada instrução na hora, sem Rollback.").small().color(egui::Color32::from_rgb(220, 150, 40)));
+                            ui.end_row();
+                        }
+                        ui.label("Confirmar ao mudar para Auto commit");
+                        ui.checkbox(&mut p.confirm_auto_commit, "");
                         ui.end_row();
                         ui.label("Maiúsculas nas palavras-chave ao formatar");
                         ui.checkbox(&mut p.keyword_upper, "");
@@ -1036,4 +1217,31 @@ fn appearance_editor(ui: &mut egui::Ui, cfg: &mut ConnConfig) {
             }
         });
     });
+}
+
+/// Folder of a new project: `~/Sqlion/<name>` until the user types another path.
+fn suggest_project_dir(name: &str) -> String {
+    let slug: String = name.trim().chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
+    let home = std::env::var("HOME").unwrap_or_default();
+    if slug.is_empty() || home.is_empty() {
+        String::new()
+    } else {
+        format!("{}/Sqlion/{}", home, slug)
+    }
+}
+
+fn project_form(ui: &mut egui::Ui, name: &mut String, dir: &mut String, dir_edited: &mut bool, msg: Option<&str>, help: &str) {
+    ui.add(egui::Label::new(help).wrap());
+    ui.add_space(4.0);
+    ui.label("Nome do projeto");
+    if ui.add(egui::TextEdit::singleline(name).desired_width(380.0)).changed() && !*dir_edited {
+        *dir = suggest_project_dir(name);
+    }
+    ui.label("Pasta");
+    if ui.add(egui::TextEdit::singleline(dir).hint_text("/caminho/da/pasta").desired_width(380.0)).changed() {
+        *dir_edited = true;
+    }
+    if let Some(m) = msg {
+        ui.colored_label(egui::Color32::from_rgb(210, 60, 60), m);
+    }
 }

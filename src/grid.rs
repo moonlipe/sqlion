@@ -1544,6 +1544,24 @@ mod tests {
     }
 
     #[test]
+    fn replacing_results_does_not_accumulate_memory() {
+        let mk = |n: usize| GridState::new(QueryResult { columns: (0..12).map(|c| format!("c{}", c)).collect(), rows: wide_rows(0, n), ..Default::default() }, "t");
+        let before = crate::memtrack::live_bytes();
+        let mut g = mk(200);
+        let one = crate::memtrack::live_bytes() - before;
+        assert!(one > 1_000_000, "the result has real size ({} bytes)", one);
+        for _ in 0..20 {
+            g = mk(200); // a new execution replaces the previous result
+            g.set_cell(0, 0, Some("edit".into())); // undo history and row state exist too
+        }
+        let held = crate::memtrack::live_bytes() - before;
+        assert!(held < one * 3 / 2, "20 replacements hold {} bytes, one result is {}", held, one);
+        drop(g);
+        let left = crate::memtrack::live_bytes().saturating_sub(before);
+        assert!(left < one / 20, "dropping the grid frees its data ({} bytes left of {})", left, one);
+    }
+
+    #[test]
     fn sorting_uses_keys_computed_once() {
         let qr = QueryResult { columns: vec!["a".into(), "b".into()], rows: vec![vec![Some("10".into()), Some("b".into())], vec![Some("9".into()), None], vec![None, Some("A".into())], vec![Some("100".into()), Some("c".into())]], ..Default::default() };
         let mut g = GridState::new(qr, "t");

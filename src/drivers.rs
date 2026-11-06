@@ -11,6 +11,8 @@ use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 pub struct Ms {
     rt: tokio::runtime::Runtime,
     client: Client<Compat<tokio::net::TcpStream>>,
+    /// set from another thread to abandon the running request
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Ms {
@@ -34,40 +36,59 @@ impl Ms {
             let cl = Client::connect(c, tcp.compat_write()).await?;
             Ok::<_, anyhow::Error>(cl)
         })?;
-        Ok(Ms { rt, client })
+        Ok(Ms { rt, client, cancel: Default::default() })
     }
 
+    pub fn cancel_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.cancel.clone()
+    }
+
+    /// Runs `sql`; when the cancel flag turns true the request is dropped and an error is returned.
+    /// The connection is not reused reliably after that, so the caller reopens the session.
     pub fn exec(&mut self, sql: &str) -> Result<QueryResult> {
-        let Ms { rt, client } = self;
+        use std::sync::atomic::Ordering::SeqCst;
+        let flag = self.cancel.clone();
+        flag.store(false, SeqCst);
+        let Ms { rt, client, .. } = self;
+        rt.block_on(async {
+            let watch = async {
+                while !flag.load(SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            };
+            tokio::select! {
+                r = Self::run_on(client, sql) => r,
+                _ = watch => Err(anyhow!("Consulta cancelada")),
+            }
+        })
+    }
+
+    async fn run_on(client: &mut Client<Compat<tokio::net::TcpStream>>, sql: &str) -> Result<QueryResult> {
         let rows_expected = returns_rows(sql);
         // transaction control must run as a plain batch: through sp_executesql (`execute`) SQL Server raises
         // error 266 ("Transaction count after EXECUTE indicates a mismatching number of BEGIN and COMMIT")
         let tx_control = matches!(crate::sqltext::first_word(sql).to_uppercase().as_str(), "BEGIN" | "COMMIT" | "ROLLBACK" | "START" | "END" | "SAVE");
         if tx_control {
-            return rt.block_on(async {
-                client.simple_query(sql).await?.into_results().await?;
-                Ok(QueryResult::default())
-            });
+            client.simple_query(sql).await?.into_results().await?;
+            return Ok(QueryResult::default());
         }
-        rt.block_on(async {
-            let mut out = QueryResult::default();
-            if rows_expected {
-                let mut stream = client.simple_query(sql).await?;
-                let cols = stream.columns().await?.map(|c| c.iter().map(|c| c.name().to_string()).collect::<Vec<_>>()).unwrap_or_default();
-                let rows = stream.into_first_result().await?;
-                out.columns = cols;
-                for row in rows {
-                    out.rows.push(row.into_iter().map(ms_val).collect());
-                }
-                if out.columns.is_empty() {
-                    out.affected = Some(0);
-                }
-            } else {
-                let r = client.execute(sql, &[]).await?;
-                out.affected = Some(r.total());
+        let mut out = QueryResult::default();
+        if rows_expected {
+            let mut stream = client.simple_query(sql).await?;
+            let cols = stream.columns().await?.map(|c| c.iter().map(|c| c.name().to_string()).collect::<Vec<_>>()).unwrap_or_default();
+            let rows = stream.into_first_result().await?;
+            out.columns = cols;
+            for row in rows {
+                out.rows.push(row.into_iter().map(ms_val).collect());
             }
-            Ok(out)
-        })
+            if out.columns.is_empty() {
+                out.affected = Some(0);
+            }
+        } else {
+            let r = client.execute(sql, &[]).await?;
+            out.affected = Some(r.total());
+        }
+        Ok(out)
     }
 }
 

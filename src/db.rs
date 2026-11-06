@@ -295,6 +295,44 @@ pub enum Conn {
     Mongo(Box<crate::drivers::Mongo>),
 }
 
+/// How to interrupt the statement a session is running, usable while another thread holds the session lock.
+pub enum CancelTarget {
+    /// the driver cannot interrupt a statement; the caller stops waiting for it instead
+    None,
+    Sqlite(rusqlite::InterruptHandle),
+    Pg(postgres::CancelToken),
+    /// `KILL QUERY` over a short second connection
+    My { id: u32, cfg: Box<ConnConfig> },
+    /// polled by the driver loop (SQL Server drops the running request when it turns true)
+    Flag(std::sync::Arc<std::sync::atomic::AtomicBool>),
+}
+
+impl CancelTarget {
+    /// True when firing really interrupts the statement on the server side.
+    pub fn interrupts(&self) -> bool {
+        !matches!(self, CancelTarget::None)
+    }
+
+    pub fn fire(&self) -> Result<(), String> {
+        match self {
+            CancelTarget::None => Ok(()),
+            CancelTarget::Sqlite(h) => {
+                h.interrupt();
+                Ok(())
+            }
+            CancelTarget::Pg(t) => t.cancel_query(postgres::NoTls).map_err(|e| e.to_string()),
+            CancelTarget::My { id, cfg } => {
+                let (mut c, _) = connect_mysql(cfg).map_err(|e| e.to_string())?;
+                mysql::prelude::Queryable::query_drop(&mut c, format!("KILL QUERY {}", id)).map_err(|e| e.to_string())
+            }
+            CancelTarget::Flag(f) => {
+                f.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Transaction state readable without locking the session (the UI polls it while a job holds the lock).
 #[derive(Default)]
 pub struct TxSnap {
@@ -328,6 +366,10 @@ pub struct Session {
     pub tx_rows: u64,
     /// the server only accepts the old (pre-4.1) password format, enabled automatically on a retry
     pub legacy_auth: bool,
+    /// how to interrupt the running statement (see `CancelTarget`)
+    pub cancel: std::sync::Arc<CancelTarget>,
+    /// the connection was abandoned in the middle of a request (SQL Server cancel): reopened before the next statement
+    pub broken: bool,
 }
 
 pub fn deobf(p: &str) -> String {
@@ -366,7 +408,14 @@ impl Session {
             Kind::SqlServer => Conn::Ms(Box::new(crate::drivers::Ms::connect(cfg, &deobf(&cfg.password))?)),
             Kind::Mongo => Conn::Mongo(Box::new(crate::drivers::Mongo::connect(cfg, &deobf(&cfg.password))?)),
         };
-        let mut s = Session { cfg: cfg.clone(), conn, snap: Default::default(), mode: cfg.mode(), tx_open: false, tx_count: 0, tx_rows: 0, legacy_auth };
+        let cancel = std::sync::Arc::new(match &conn {
+            Conn::Sqlite(c) => CancelTarget::Sqlite(c.get_interrupt_handle()),
+            Conn::Pg(c) => CancelTarget::Pg(c.cancel_token()),
+            Conn::My(c) => CancelTarget::My { id: c.connection_id(), cfg: Box::new(cfg.clone()) },
+            Conn::Ms(m) => CancelTarget::Flag(m.cancel_flag()),
+            Conn::Mongo(_) => CancelTarget::None,
+        });
+        let mut s = Session { cfg: cfg.clone(), conn, snap: Default::default(), mode: cfg.mode(), tx_open: false, tx_count: 0, tx_rows: 0, legacy_auth, cancel, broken: false };
         if let Conn::My(_) = s.conn {
             // old servers (MySQL < 5.5.3, MariaDB 5.1) do not know utf8mb4
             if s.raw("SET NAMES utf8mb4").is_err() {
@@ -466,8 +515,30 @@ impl Session {
     /// Run one statement and return a result set (or the affected-row count).
     /// `limit` > 0 applies paging to plain SELECT statements (200 rows by default,
     /// ModelPreferences.java:356).
+    /// Replaces a connection that was dropped in the middle of a request; an open transaction is lost with it.
+    fn reopen_if_broken(&mut self) -> Result<()> {
+        if !self.broken {
+            return Ok(());
+        }
+        let fresh = Session::open(&self.cfg)?;
+        self.conn = fresh.conn;
+        self.cancel = fresh.cancel;
+        self.tx_open = false;
+        self.tx_count = 0;
+        self.tx_rows = 0;
+        self.broken = false;
+        self.sync_snap();
+        Ok(())
+    }
+
     pub fn run(&mut self, sql: &str, limit: usize, offset: usize) -> Result<QueryResult> {
+        if let Err(e) = self.reopen_if_broken() {
+            return Err(clean_err(e));
+        }
         let r = self.run_inner(sql, limit, offset).map_err(clean_err);
+        if r.is_err() && matches!(self.conn, Conn::Ms(_)) && matches!(&r, Err(e) if e.to_string().contains("Consulta cancelada")) {
+            self.broken = true;
+        }
         self.sync_snap();
         r
     }

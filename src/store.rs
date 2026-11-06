@@ -42,6 +42,10 @@ pub struct Prefs {
     pub history_days: u32,     // 90
     pub history_page: usize,   // 200
     pub default_auto_commit: bool,
+    /// ask before switching a connection to Auto commit
+    pub confirm_auto_commit: bool,
+    /// seconds a query may run before it is cancelled (0 = no limit)
+    pub query_timeout_secs: u32,
     pub keyword_upper: bool,
     pub statement_delimiter: String, // ";"
     pub params_enabled: bool,  // true
@@ -62,6 +66,8 @@ impl Default for Prefs {
             history_days: crate::constants::HISTORY_DAYS,
             history_page: crate::constants::HISTORY_PAGE,
             default_auto_commit: true,
+            confirm_auto_commit: true,
+            query_timeout_secs: 0,
             keyword_upper: true,
             statement_delimiter: crate::constants::STATEMENT_DELIMITER.into(),
             params_enabled: true,
@@ -90,6 +96,9 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub path: String,
+    /// organization folders that exist even when empty (folders with connections exist anyway)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<String>,
 }
 
 pub const PROJECT_FILE: &str = "sqlion-project.json";
@@ -117,6 +126,8 @@ pub struct ProjectFile {
     /// script file name -> id of the connection it last ran on
     #[serde(default)]
     pub script_conns: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<String>,
 }
 
 pub fn new_project_id() -> String {
@@ -133,6 +144,9 @@ pub struct Store {
     /// opened projects that live in folders (the default project is implicit)
     #[serde(default)]
     pub projects: Vec<Project>,
+    /// organization folders of the default project that exist even when empty
+    #[serde(default)]
+    pub default_folders: Vec<String>,
     /// passwords of project connections (obfuscated), by connection id; they never go into the project folder
     #[serde(skip)]
     pub secrets: std::collections::HashMap<String, String>,
@@ -189,6 +203,7 @@ impl Store {
         if !pf.name.is_empty() {
             p.name = pf.name.clone();
         }
+        p.folders = pf.folders.clone();
         self.connections.retain(|c| c.project != p.id);
         for mut c in pf.connections {
             c.project = p.id.clone();
@@ -214,6 +229,44 @@ impl Store {
         }
     }
 
+    /// Connection a script last ran on, looked up by its path (project scripts have their own key).
+    pub fn script_conn_of(&self, path: &std::path::Path) -> Option<String> {
+        self.script_conns.get(&self.script_key(path)).cloned()
+    }
+
+    /// Where a new script goes: the folder of the connection's project, or `loose` for a loose script.
+    pub fn new_script_dir(&self, conn: Option<&str>, loose: &std::path::Path) -> PathBuf {
+        let project = conn.and_then(|c| self.connections.iter().find(|x| x.id == c)).map(|c| c.project.as_str()).filter(|p| !p.is_empty());
+        match project.and_then(|id| self.projects.iter().find(|p| p.id == id)) {
+            Some(p) => p.scripts_dir(),
+            None => loose.to_path_buf(),
+        }
+    }
+
+    /// Moves a script file into `to_dir` (a project's `scripts/` or the loose folder) and carries its connection link.
+    pub fn move_script(&mut self, from: &std::path::Path, to_dir: &std::path::Path) -> Result<PathBuf, String> {
+        let name = from.file_name().ok_or("Script inválido")?;
+        let dest = to_dir.join(name);
+        if from.parent() == Some(to_dir) {
+            return Ok(dest);
+        }
+        if dest.exists() {
+            return Err(format!("Já existe um script chamado {} no destino", name.to_string_lossy()));
+        }
+        std::fs::create_dir_all(to_dir).map_err(|e| e.to_string())?;
+        let old_key = self.script_key(from);
+        if std::fs::rename(from, &dest).is_err() {
+            // another volume: copy, then remove the original
+            std::fs::copy(from, &dest).map_err(|e| e.to_string())?;
+            std::fs::remove_file(from).map_err(|e| e.to_string())?;
+        }
+        if let Some(conn) = self.script_conns.remove(&old_key) {
+            let new_key = self.script_key(&dest);
+            self.script_conns.insert(new_key, conn);
+        }
+        Ok(dest)
+    }
+
     pub fn project_of_script(&self, path: &std::path::Path) -> Option<&Project> {
         self.projects.iter().find(|p| path.starts_with(p.scripts_dir()))
     }
@@ -224,11 +277,17 @@ impl Store {
         if name.is_empty() {
             return Err("Informe o nome do projeto".into());
         }
+        if dir.as_os_str().is_empty() {
+            return Err("Informe a pasta do projeto".into());
+        }
         if dir.join(PROJECT_FILE).exists() {
             return Err("Esta pasta já é um projeto; use Abrir projeto".into());
         }
+        if self.projects.iter().any(|p| p.name.eq_ignore_ascii_case(name)) {
+            return Err("Já existe um projeto com esse nome".into());
+        }
         std::fs::create_dir_all(dir.join("scripts")).map_err(|e| e.to_string())?;
-        let p = Project { id: new_project_id(), name: name.to_string(), path: dir.to_string_lossy().to_string() };
+        let p = Project { id: new_project_id(), name: name.to_string(), path: dir.to_string_lossy().to_string(), folders: vec![] };
         self.projects.push(p.clone());
         self.write_project(&p)?;
         Ok(p)
@@ -239,7 +298,7 @@ impl Store {
         if let Some(p) = self.projects.iter().find(|p| p.dir() == dir) {
             return Ok(p.clone());
         }
-        let p = Project { id: new_project_id(), name: dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), path: dir.to_string_lossy().to_string() };
+        let p = Project { id: new_project_id(), name: dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), path: dir.to_string_lossy().to_string(), folders: vec![] };
         self.attach_project(p.clone())?;
         let _ = std::fs::create_dir_all(p.scripts_dir());
         Ok(self.projects.iter().find(|x| x.id == p.id).cloned().unwrap_or(p))
@@ -296,6 +355,150 @@ impl Store {
         Ok(())
     }
 
+    /// Moves the connections and scripts of the default project into a new project folder.
+    ///
+    /// Phase 1 creates the project, phase 2 copies the `.sql` files, phase 3 re-links connections and scripts and only
+    /// then removes the originals. A failure before phase 3 undoes the copies and leaves the default project untouched.
+    pub fn convert_default_project(&mut self, name: &str, dir: &std::path::Path, scripts_dir: &std::path::Path) -> Result<Project, String> {
+        let existed = dir.exists();
+        let p = self.create_project(name, dir)?;
+        let undo = |s: &mut Store, copied: &[PathBuf], why: String| -> String {
+            for f in copied {
+                let _ = std::fs::remove_file(f);
+            }
+            s.projects.retain(|x| x.id != p.id);
+            if !existed {
+                let _ = std::fs::remove_dir_all(dir);
+            } else {
+                let _ = std::fs::remove_file(p.file());
+            }
+            why
+        };
+        let mut copied: Vec<PathBuf> = Vec::new();
+        let sources: Vec<PathBuf> = std::fs::read_dir(scripts_dir)
+            .map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).filter(|f| f.is_file() && f.extension().map(|x| x == "sql").unwrap_or(false)).collect())
+            .unwrap_or_default();
+        let dest_dir = p.scripts_dir();
+        for src in &sources {
+            let dest = dest_dir.join(src.file_name().unwrap_or_default());
+            if dest.exists() {
+                return Err(undo(self, &copied, format!("{} já existe na pasta do projeto", dest.display())));
+            }
+            match std::fs::copy(src, &dest) {
+                Ok(_) => copied.push(dest),
+                Err(e) => return Err(undo(self, &copied, format!("Não foi possível copiar {}: {}", src.display(), e))),
+            }
+        }
+        // phase 3: re-link, write the project file, and only then remove the originals
+        let before_conns = self.connections.clone();
+        let before_links = self.script_conns.clone();
+        let before_folders = self.default_folders.clone();
+        for c in self.connections.iter_mut().filter(|c| c.project.is_empty()) {
+            c.project = p.id.clone();
+            if !c.password.is_empty() {
+                self.secrets.insert(c.id.clone(), c.password.clone());
+            }
+        }
+        let plain: Vec<String> = self.script_conns.keys().filter(|k| !k.contains('/')).cloned().collect();
+        for k in plain {
+            if let Some(v) = self.script_conns.remove(&k) {
+                self.script_conns.insert(format!("{}/{}", p.id, k), v);
+            }
+        }
+        if let Some(pr) = self.projects.iter_mut().find(|x| x.id == p.id) {
+            pr.folders = std::mem::take(&mut self.default_folders);
+        }
+        let pr = self.projects.iter().find(|x| x.id == p.id).cloned().unwrap_or(p.clone());
+        if let Err(e) = self.write_project(&pr) {
+            self.connections = before_conns;
+            self.script_conns = before_links;
+            self.default_folders = before_folders;
+            return Err(undo(self, &copied, e));
+        }
+        for src in &sources {
+            let _ = std::fs::remove_file(src);
+        }
+        Ok(pr)
+    }
+
+    /// Moves a connection to another project ("" = the default one). The id, the local password and the links of
+    /// scripts (which point at the connection id) are kept; the organization folder is reset.
+    pub fn move_connection(&mut self, conn_id: &str, to_project: &str) -> Result<(), String> {
+        if !to_project.is_empty() && !self.projects.iter().any(|p| p.id == to_project) {
+            return Err("Projeto não encontrado".into());
+        }
+        let c = self.connections.iter_mut().find(|c| c.id == conn_id).ok_or("Conexão não encontrada")?;
+        if c.project == to_project {
+            return Ok(());
+        }
+        if !c.password.is_empty() {
+            self.secrets.insert(c.id.clone(), c.password.clone());
+        }
+        c.project = to_project.to_string();
+        c.folder.clear();
+        Ok(())
+    }
+
+    /// Organization folders of a project: the ones created explicitly plus those used by connections.
+    pub fn folders_of(&self, project: &str) -> Vec<String> {
+        let mut f: Vec<String> = if project.is_empty() { self.default_folders.clone() } else { self.projects.iter().find(|p| p.id == project).map(|p| p.folders.clone()).unwrap_or_default() };
+        f.extend(self.connections.iter().filter(|c| c.project == project && !c.folder.is_empty()).map(|c| c.folder.clone()));
+        f.sort();
+        f.dedup();
+        f
+    }
+
+    fn folder_list(&mut self, project: &str) -> Result<&mut Vec<String>, String> {
+        if project.is_empty() {
+            Ok(&mut self.default_folders)
+        } else {
+            self.projects.iter_mut().find(|p| p.id == project).map(|p| &mut p.folders).ok_or_else(|| "Projeto não encontrado".to_string())
+        }
+    }
+
+    fn check_folder_name(&self, project: &str, name: &str, except: Option<&str>) -> Result<String, String> {
+        let name = name.trim();
+        if name.is_empty() || name.contains('/') || name.contains('\\') {
+            return Err("Nome de pasta inválido".into());
+        }
+        if self.folders_of(project).iter().any(|f| f.eq_ignore_ascii_case(name) && Some(f.as_str()) != except) {
+            return Err("Já existe uma pasta com esse nome".into());
+        }
+        Ok(name.to_string())
+    }
+
+    pub fn add_folder(&mut self, project: &str, name: &str) -> Result<(), String> {
+        let name = self.check_folder_name(project, name, None)?;
+        self.folder_list(project)?.push(name);
+        Ok(())
+    }
+
+    pub fn rename_folder(&mut self, project: &str, old: &str, new: &str) -> Result<(), String> {
+        let new = self.check_folder_name(project, new, Some(old))?;
+        let list = self.folder_list(project)?;
+        list.retain(|f| f != old);
+        list.push(new.clone());
+        for c in self.connections.iter_mut().filter(|c| c.project == project && c.folder == old) {
+            c.folder = new.clone();
+        }
+        Ok(())
+    }
+
+    /// Deletes the folder only: its connections go to the root of the project.
+    pub fn delete_folder(&mut self, project: &str, name: &str) -> Result<(), String> {
+        self.folder_list(project)?.retain(|f| f != name);
+        for c in self.connections.iter_mut().filter(|c| c.project == project && c.folder == name) {
+            c.folder.clear();
+        }
+        Ok(())
+    }
+
+    pub fn move_to_folder(&mut self, conn_id: &str, folder: &str) -> Result<(), String> {
+        let c = self.connections.iter_mut().find(|c| c.id == conn_id).ok_or("Conexão não encontrada")?;
+        c.folder = folder.to_string();
+        Ok(())
+    }
+
     /// Writes `sqlion-project.json`: connections without password, in a stable order (by id) so that diffs and merges stay readable.
     pub fn write_project(&self, p: &Project) -> Result<(), String> {
         let mut conns: Vec<ConnConfig> = self.connections.iter().filter(|c| c.project == p.id).cloned().collect();
@@ -306,7 +509,7 @@ impl Store {
         }
         let prefix = format!("{}/", p.id);
         let script_conns = self.script_conns.iter().filter_map(|(k, v)| k.strip_prefix(&prefix).map(|n| (n.to_string(), v.clone()))).collect();
-        let pf = ProjectFile { format_version: PROJECT_FORMAT, name: p.name.clone(), connections: conns, script_conns };
+        let pf = ProjectFile { format_version: PROJECT_FORMAT, name: p.name.clone(), connections: conns, script_conns, folders: p.folders.clone() };
         let text = serde_json::to_string_pretty(&pf).map_err(|e| e.to_string())?;
         std::fs::create_dir_all(p.dir()).map_err(|e| e.to_string())?;
         std::fs::write(p.file(), text + "\n").map_err(|e| e.to_string())
@@ -341,6 +544,7 @@ impl Store {
             // connections of folder projects live in their project file, not here
             let mut w = Store {
                 projects: self.projects.clone(),
+                default_folders: self.default_folders.clone(),
                 connections: self.connections.iter().filter(|c| c.project.is_empty()).cloned().collect(),
                 history: self.history.clone(),
                 scripts: self.scripts.clone(),
@@ -535,7 +739,7 @@ mod tests {
         std::fs::write(a.scripts_dir().join("x.sql"), "select 1").unwrap();
         assert_eq!(s.project_counts(&a.id), (0, 1));
         // a folder without a project file is never deleted
-        let fake = Project { id: "proj-fake".into(), name: "F".into(), path: base.join("fake").to_string_lossy().to_string() };
+        let fake = Project { id: "proj-fake".into(), name: "F".into(), path: base.join("fake").to_string_lossy().to_string(), folders: vec![] };
         std::fs::create_dir_all(&fake.path).unwrap();
         s.projects.push(fake.clone());
         assert!(s.delete_project_folder("proj-fake").is_err());
@@ -544,6 +748,238 @@ mod tests {
         s.delete_project_folder(&a.id).unwrap();
         assert!(!a.dir().exists());
         assert!(s.projects.iter().all(|p| p.id != a.id) && s.projects.iter().any(|p| p.id == b.id));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn conn(name: &str, pw: &str) -> ConnConfig {
+        let mut c = pg(name, "", pw);
+        c.folder = String::new();
+        c
+    }
+
+    fn temp_base(tag: &str) -> PathBuf {
+        let b = std::env::temp_dir().join(format!("dbr-test-{}-{}", tag, new_project_id()));
+        std::fs::create_dir_all(&b).unwrap();
+        b
+    }
+
+    #[test]
+    fn convert_default_project_moves_connections_and_scripts() {
+        let base = temp_base("convert");
+        let scripts = base.join("global");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(scripts.join("a.sql"), "select 1").unwrap();
+        std::fs::write(scripts.join("b.sql"), "select 2").unwrap();
+        let mut s = Store::memory();
+        let c = conn("Banco", "segredo");
+        let cid = c.id.clone();
+        s.connections.push(c);
+        s.script_conns.insert("a.sql".into(), cid.clone());
+        s.default_folders.push("Vazia".into());
+        let p = s.convert_default_project("Meu projeto", &base.join("proj"), &scripts).unwrap();
+        assert!(p.scripts_dir().join("a.sql").is_file() && p.scripts_dir().join("b.sql").is_file());
+        assert!(!scripts.join("a.sql").exists() && !scripts.join("b.sql").exists(), "originals are removed at the end");
+        assert_eq!(s.connections[0].project, p.id);
+        assert_eq!(s.script_conns.get(&format!("{}/a.sql", p.id)), Some(&cid), "script link follows the project");
+        assert!(!s.script_conns.contains_key("a.sql"));
+        assert!(s.default_folders.is_empty() && s.folders_of(&p.id) == vec!["Vazia".to_string()]);
+        let text = std::fs::read_to_string(p.file()).unwrap();
+        assert!(text.contains("Banco") && !text.contains("segredo"), "no password in the project file");
+        assert_eq!(s.secrets.get(&cid).map(|x| x.as_str()), Some(s.connections[0].password.as_str()), "the password stays on this machine");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn convert_failure_leaves_the_default_project_intact() {
+        let base = temp_base("convert-fail");
+        let scripts = base.join("global");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(scripts.join("a.sql"), "select 1").unwrap();
+        std::fs::write(scripts.join("b.sql"), "select 2").unwrap();
+        // the destination already has a directory called b.sql: copying it fails after a.sql was copied
+        let dir = base.join("proj");
+        std::fs::create_dir_all(dir.join("scripts").join("b.sql")).unwrap();
+        let mut s = Store::memory();
+        s.connections.push(conn("Banco", ""));
+        let before = s.connections.clone();
+        let e = s.convert_default_project("X", &dir, &scripts).unwrap_err();
+        assert!(e.contains("b.sql"), "{}", e);
+        assert!(scripts.join("a.sql").exists() && scripts.join("b.sql").exists(), "originals untouched");
+        assert!(!dir.join("scripts").join("a.sql").exists(), "the partial copy is undone");
+        assert!(!dir.join(PROJECT_FILE).exists());
+        assert!(s.projects.is_empty() && s.connections[0].project == before[0].project);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn move_connection_between_projects_keeps_id_password_and_links() {
+        let base = temp_base("move");
+        let mut s = Store::memory();
+        let a = s.create_project("A", &base.join("a")).unwrap();
+        let b = s.create_project("B", &base.join("b")).unwrap();
+        let mut c = conn("Banco", "pw");
+        c.project = a.id.clone();
+        c.folder = "Pasta".into();
+        let cid = c.id.clone();
+        s.connections.push(c);
+        s.script_conns.insert(format!("{}/x.sql", a.id), cid.clone());
+        s.move_connection(&cid, &b.id).unwrap();
+        assert_eq!(s.connections[0].project, b.id);
+        assert!(s.connections[0].folder.is_empty());
+        assert_eq!(s.script_conns.values().next(), Some(&cid), "the script keeps pointing at the same connection id");
+        assert!(s.secrets.contains_key(&cid));
+        s.write_project(&a).unwrap();
+        s.write_project(&b).unwrap();
+        assert!(!std::fs::read_to_string(a.file()).unwrap().contains("Banco"));
+        assert!(std::fs::read_to_string(b.file()).unwrap().contains("Banco"));
+        assert!(s.move_connection(&cid, "proj-nao-existe").is_err());
+        s.move_connection(&cid, "").unwrap();
+        assert!(s.connections[0].project.is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn organization_folders_can_be_created_renamed_and_deleted() {
+        let base = temp_base("folders");
+        let mut s = Store::memory();
+        let p = s.create_project("P", &base.join("p")).unwrap();
+        s.add_folder(&p.id, "Prod").unwrap();
+        assert!(s.add_folder(&p.id, "prod").is_err(), "same name");
+        assert!(s.add_folder(&p.id, "a/b").is_err() && s.add_folder(&p.id, " ").is_err());
+        let mut c = conn("Banco", "");
+        c.project = p.id.clone();
+        c.folder = "Prod".into();
+        let cid = c.id.clone();
+        s.connections.push(c);
+        s.rename_folder(&p.id, "Prod", "Producao").unwrap();
+        assert_eq!(s.connections[0].folder, "Producao");
+        assert_eq!(s.folders_of(&p.id), vec!["Producao".to_string()]);
+        let cur = s.projects[0].clone();
+        s.write_project(&cur).unwrap();
+        let reopened = Store::memory().open_project(&base.join("p")).unwrap();
+        assert_eq!(reopened.folders, vec!["Producao".to_string()], "folders survive in the project file");
+        s.delete_folder(&p.id, "Producao").unwrap();
+        assert!(s.connections.iter().any(|c| c.id == cid), "the connection is kept");
+        assert!(s.connections[0].folder.is_empty());
+        assert!(s.folders_of(&p.id).is_empty());
+        // the default project has its own list
+        s.add_folder("", "Soltas").unwrap();
+        assert_eq!(s.folders_of(""), vec!["Soltas".to_string()]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn create_and_open_project_validations() {
+        let base = temp_base("newproj");
+        let mut s = Store::memory();
+        // new folder: created together with scripts/
+        let p = s.create_project("Novo", &base.join("novo")).unwrap();
+        assert!(p.file().is_file() && p.scripts_dir().is_dir());
+        // empty path, empty name, name already used, folder that already is a project
+        assert!(s.create_project("X", std::path::Path::new("")).unwrap_err().contains("pasta"));
+        assert!(s.create_project("  ", &base.join("a")).is_err());
+        assert!(s.create_project("novo", &base.join("b")).unwrap_err().contains("nome"));
+        assert!(s.create_project("Outro", &base.join("novo")).unwrap_err().contains("Abrir projeto"));
+        // a path below a regular file cannot be created
+        std::fs::write(base.join("arquivo"), "x").unwrap();
+        assert!(s.create_project("Sem permissão", &base.join("arquivo").join("sub")).is_err());
+        assert_eq!(s.projects.len(), 1, "failures register nothing");
+        // opening: a folder without a project file is refused and nothing changes
+        std::fs::create_dir_all(base.join("vazia")).unwrap();
+        assert!(Store::memory().open_project(&base.join("vazia")).is_err());
+        // opening a clone: connections come without password
+        let mut other = Store::memory();
+        let opened = other.open_project(&base.join("novo")).unwrap();
+        assert_eq!(opened.dir(), base.join("novo"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn project_folder_can_be_versioned_without_secrets() {
+        if !crate::git::available() {
+            return;
+        }
+        std::env::set_var("GIT_AUTHOR_NAME", "Teste");
+        std::env::set_var("GIT_AUTHOR_EMAIL", "teste@exemplo.com");
+        std::env::set_var("GIT_COMMITTER_NAME", "Teste");
+        std::env::set_var("GIT_COMMITTER_EMAIL", "teste@exemplo.com");
+        let base = temp_base("projgit");
+        let mut s = Store::memory();
+        let p = s.create_project("Git", &base.join("g")).unwrap();
+        let mut c = conn("Banco", "segredo-local");
+        c.project = p.id.clone();
+        s.connections.push(c);
+        s.write_project(&p).unwrap();
+        std::fs::write(p.scripts_dir().join("a.sql"), "select 1").unwrap();
+        assert!(!crate::git::is_repo(&p.dir()) && crate::git::init(&p.dir()).ok);
+        let changed: Vec<String> = crate::git::changed_files(&p.dir()).into_iter().map(|c| c.1).collect();
+        assert!(changed.contains(&PROJECT_FILE.to_string()) && changed.iter().any(|f| f.ends_with("a.sql")), "{:?}", changed);
+        assert!(crate::git::commit_all(&p.dir(), "primeiro").ok);
+        assert!(crate::git::changed_files(&p.dir()).is_empty());
+        let tracked = crate::git::run(&p.dir(), &["grep", "-c", "segredo-local"]);
+        assert!(!tracked.ok, "the password is not in the repository");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn new_scripts_go_to_the_project_of_the_connection_or_loose() {
+        let base = temp_base("newscript");
+        let loose = base.join("soltos");
+        let mut s = Store::memory();
+        let p = s.create_project("P", &base.join("p")).unwrap();
+        let mut inside = conn("Dentro", "");
+        inside.project = p.id.clone();
+        let outside = conn("Fora", "");
+        let (iid, oid) = (inside.id.clone(), outside.id.clone());
+        s.connections.push(inside);
+        s.connections.push(outside);
+        assert_eq!(s.new_script_dir(Some(&iid), &loose), p.scripts_dir());
+        assert_eq!(s.new_script_dir(Some(&oid), &loose), loose, "a connection of the default project");
+        assert_eq!(s.new_script_dir(None, &loose), loose, "no connection");
+        assert_eq!(s.new_script_dir(Some("nao-existe"), &loose), loose);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn moving_a_script_between_loose_and_project() {
+        let base = temp_base("movescript");
+        let loose = base.join("soltos");
+        std::fs::create_dir_all(&loose).unwrap();
+        let mut s = Store::memory();
+        let p = s.create_project("P", &base.join("p")).unwrap();
+        let c = conn("Banco", "");
+        let cid = c.id.clone();
+        s.connections.push(c);
+        let f = loose.join("rel.sql");
+        std::fs::write(&f, "select 1").unwrap();
+        s.script_conns.insert("rel.sql".into(), cid.clone());
+        // loose -> project: the link moves to the project's key
+        let moved = s.move_script(&f, &p.scripts_dir()).unwrap();
+        assert_eq!(moved, p.scripts_dir().join("rel.sql"));
+        assert!(!f.exists() && moved.is_file());
+        assert_eq!(s.script_conn_of(&moved), Some(cid.clone()));
+        assert!(!s.script_conns.contains_key("rel.sql"));
+        // conflict: nothing is moved and the link stays
+        std::fs::write(&f, "outro").unwrap();
+        let e = s.move_script(&moved, &loose).unwrap_err();
+        assert!(e.contains("rel.sql"), "{}", e);
+        assert!(moved.is_file() && s.script_conn_of(&moved) == Some(cid.clone()));
+        std::fs::remove_file(&f).unwrap();
+        // project -> loose
+        let back = s.move_script(&moved, &loose).unwrap();
+        assert_eq!(s.script_conn_of(&back), Some(cid));
+        assert!(!moved.exists());
+        // same folder: no-op
+        assert_eq!(s.move_script(&back, &loose).unwrap(), back);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn project_file_without_folders_still_loads() {
+        let base = temp_base("oldfmt");
+        std::fs::write(base.join(PROJECT_FILE), r#"{"format_version":1,"name":"Velho","connections":[]}"#).unwrap();
+        let p = Store::memory().open_project(&base).unwrap();
+        assert!(p.folders.is_empty());
         let _ = std::fs::remove_dir_all(&base);
     }
 

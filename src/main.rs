@@ -15,6 +15,11 @@ mod grid;
 mod sample;
 mod sqltext;
 mod store;
+#[cfg(test)]
+mod memtrack;
+#[cfg(test)]
+#[global_allocator]
+static ALLOC: memtrack::Counting = memtrack::Counting;
 mod tabs;
 
 fn main() -> eframe::Result<()> {

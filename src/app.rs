@@ -68,13 +68,34 @@ impl App {
                 sh.store.connections.push(cfg);
                 let _ = sh.connect(&id);
                 nav_sel = Some(NavSel::Conn(id.clone()));
+                if std::env::var("DBR_DEMO_PROJECT").is_ok() {
+                    // preview helper: a project with one organization folder and one connection
+                    let dir = std::env::temp_dir().join("sqlion-demo-project");
+                    let _ = std::fs::remove_dir_all(&dir);
+                    if let Ok(p) = sh.store.create_project("Cliente Acme", &dir) {
+                        let _ = sh.store.add_folder(&p.id, "Produção");
+                        let mut c2 = ConnConfig::new(Kind::Postgres);
+                        c2.name = "Financeiro".into();
+                        c2.project = p.id.clone();
+                        c2.folder = "Produção".into();
+                        sh.store.connections.push(c2);
+                        let _ = sh.store.add_folder(&p.id, "Homologação");
+                    }
+                }
                 let sql = "SELECT c.customer_id, c.first_name, c.last_name, c.country,\n       COUNT(o.order_id) AS orders\nFROM customers c\nLEFT JOIN orders o ON o.customer_id = c.customer_id\nWHERE c.country <> 'Chile'\nGROUP BY c.customer_id\nORDER BY orders DESC;";
+                // preview helper: DBR_SLOW=1 runs a query that never ends, to show the Cancel button
+                let sql = if std::env::var("DBR_SLOW").is_ok() { "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 2000000000) SELECT count(*) FROM c" } else { sql };
                 let mut t = SqlTab::new(Some(id.clone()), sql.into(), "<Amostra (SQLite)> Script-1".into());
                 t.cursor = (10, 10);
-                t.execute(&mut sh, 1, false, false, false);
+                if std::env::var("DBR_SLOW").is_err() {
+                    t.execute(&mut sh, 1, false, false, false);
+                }
                 tabs.push(Tab { id: 1, kind: TabKind::Sql(Box::new(t)) });
-                let tt = TableTab::new(&mut sh, &id, "main", "customers", false);
-                tabs.push(Tab { id: 2, kind: TabKind::Table(Box::new(tt)) });
+                if std::env::var("DBR_SLOW").is_err() {
+                    // (loading a table needs the session, which the endless query holds)
+                    let tt = TableTab::new(&mut sh, &id, "main", "customers", false);
+                    tabs.push(Tab { id: 2, kind: TabKind::Table(Box::new(tt)) });
+                }
                 let open_ids: Vec<egui::Id> = vec![egui::Id::new(("conn", &id)), egui::Id::new(("grp", &id, "main", "T")), egui::Id::new(("tbl", &id, "main", "customers")), egui::Id::new(("objfolder", &id, "main", "index")), egui::Id::new(("objfolder", &id, "main", "trigger"))];
                 for oid in open_ids {
                     let mut s = CollapsingState::load_with_default_open(&cc.egui_ctx, oid, true);
@@ -113,7 +134,7 @@ impl App {
                 dialog = Some(Dialog::Conn { cfg: Box::new(c), is_new: true, msg: None, pass: String::new() });
             }
         }
-        let mut active = if demo { 1 } else { 0 };
+        let mut active = if demo && std::env::var("DBR_SLOW").is_err() { 1 } else { 0 };
         if demo && std::env::var("DBR_TAB").map(|v| v == "welcome").unwrap_or(false) {
             tabs.push(Tab { id: 9999, kind: TabKind::Welcome });
             active = tabs.len() - 1;
@@ -140,14 +161,20 @@ impl App {
 
     // ------------------------------------------------------------ helpers
     pub fn open_sql(&mut self, conn: Option<String>, text: String, title: Option<String>) {
+        self.open_sql_in(conn, text, title, None);
+    }
+
+    /// Opens an SQL tab; a new script file is created in `dir` (the loose scripts folder when `None`).
+    pub fn open_sql_in(&mut self, conn: Option<String>, text: String, title: Option<String>, dir: Option<std::path::PathBuf>) {
         let n = self.tabs.iter().filter(|t| matches!(t.kind, TabKind::Sql(_))).count() + 1;
         let cname = conn.as_ref().map(|c| self.sh.conn_name(c)).unwrap_or_else(|| "Sem conexão".into());
         let title_given = title.is_some();
         let title = title.unwrap_or_else(|| format!("<{}> Script-{}", cname, n));
-        let path = if self.sh.persist { Some(self.next_script_path()) } else { None };
+        let path = if self.sh.persist { Some(self.next_script_path(dir.as_deref())) } else { None };
         // new scripts are named like DBeaver does: Script.sql, Script-1.sql, Script-2.sql ... (SQLEditorUtils.java:258)
+        let project_tag = path.as_ref().and_then(|p| self.sh.store.project_of_script(p)).map(|p| format!("[{}] ", p.name)).unwrap_or_default();
         let title = match (&path, title_given) {
-            (Some(p), false) => format!("<{}> {}", cname, p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()),
+            (Some(p), false) => format!("{}<{}> {}", project_tag, cname, p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()),
             _ => title,
         };
         let mut t = SqlTab::new(conn, text, title);
@@ -159,11 +186,12 @@ impl App {
     }
 
     /// First free `Script.sql`, `Script-1.sql`... in the scripts folder, also skipping names of open tabs.
-    fn next_script_path(&self) -> std::path::PathBuf {
+    fn next_script_path(&self, dir: Option<&std::path::Path>) -> std::path::PathBuf {
+        let dir = dir.unwrap_or(&self.scripts_dir);
         let used: Vec<std::path::PathBuf> = self.tabs.iter().filter_map(|t| if let TabKind::Sql(s) = &t.kind { s.file.clone() } else { None }).collect();
         for n in 0.. {
             let name = if n == 0 { "Script.sql".to_string() } else { format!("Script-{}.sql", n) };
-            let p = self.scripts_dir.join(name);
+            let p = dir.join(name);
             if !p.exists() && !used.contains(&p) {
                 return p;
             }
@@ -179,7 +207,8 @@ impl App {
         }
         let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         if let Ok(t) = std::fs::read_to_string(p) {
-            let c = self.sh.script_conn(&name).or_else(|| self.current_conn());
+            let linked = self.sh.store.script_conn_of(p).filter(|c| self.sh.cfg(c).is_some());
+            let c = linked.or_else(|| self.current_conn());
             self.open_sql(c, t, Some(name));
             if let Some(Tab { kind: TabKind::Sql(s), .. }) = self.tabs.last_mut() {
                 s.file = Some(p.to_path_buf());
@@ -202,8 +231,9 @@ impl App {
         std::fs::rename(path, &new_path).map_err(|e| e.to_string())?;
         let old = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let new = new_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        if let Some(c) = self.sh.store.script_conns.remove(&old) {
-            self.sh.store.script_conns.insert(new.clone(), c);
+        let (old_key, new_key) = (self.sh.store.script_key(path), self.sh.store.script_key(&new_path));
+        if let Some(c) = self.sh.store.script_conns.remove(&old_key) {
+            self.sh.store.script_conns.insert(new_key, c);
             self.sh.save();
         }
         for t in self.tabs.iter_mut() {
@@ -220,10 +250,40 @@ impl App {
         Ok(())
     }
 
+    /// Moves a script to a project (`Some(id)`) or to the loose scripts (`None`), following open tabs.
+    pub fn move_script_to(&mut self, path: &std::path::Path, project: Option<&str>) {
+        let to = match project.and_then(|id| self.sh.store.projects.iter().find(|p| p.id == id)) {
+            Some(p) => p.scripts_dir(),
+            None => self.scripts_dir.clone(),
+        };
+        for t in self.tabs.iter_mut() {
+            if let TabKind::Sql(s) = &mut t.kind {
+                if s.file.as_deref() == Some(path) && s.dirty && !s.text.trim().is_empty() {
+                    s.save_file();
+                }
+            }
+        }
+        match self.sh.store.move_script(path, &to) {
+            Ok(dest) => {
+                for t in self.tabs.iter_mut() {
+                    if let TabKind::Sql(s) = &mut t.kind {
+                        if s.file.as_deref() == Some(path) {
+                            s.file = Some(dest.clone());
+                        }
+                    }
+                }
+                self.git_cache = None;
+                self.sh.save();
+                self.toast("Script movido");
+            }
+            Err(e) => self.toast(e),
+        }
+    }
+
     pub fn delete_script(&mut self, path: &std::path::Path) {
         let _ = std::fs::remove_file(path);
-        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        self.sh.store.script_conns.remove(&name);
+        let key = self.sh.store.script_key(path);
+        self.sh.store.script_conns.remove(&key);
         for t in self.tabs.iter_mut() {
             if let TabKind::Sql(s) = &mut t.kind {
                 if s.file.as_deref() == Some(path) {
@@ -265,6 +325,36 @@ impl App {
         self.dialog = Some(Dialog::Git { msg, output: String::new(), avail, repo, branch, changed, dir });
     }
 
+    /// Saves the open scripts that live in the loose scripts folder, so that a copy of the folder has their latest text.
+    pub fn save_loose_scripts(&mut self) {
+        let dir = self.scripts_dir.clone();
+        for t in self.tabs.iter_mut() {
+            if let TabKind::Sql(s) = &mut t.kind {
+                if s.dirty && !s.text.trim().is_empty() && s.file.as_ref().map(|f| f.starts_with(&dir)).unwrap_or(false) {
+                    s.save_file();
+                }
+            }
+        }
+    }
+
+    /// After the default project was converted: tabs whose script moved now point at the project folder.
+    pub fn relink_tabs_after_convert(&mut self, old_dir: &std::path::Path, new_dir: &std::path::Path) {
+        for t in self.tabs.iter_mut() {
+            if let TabKind::Sql(s) = &mut t.kind {
+                if let Some(f) = &s.file {
+                    if f.parent() == Some(old_dir) {
+                        if let Some(name) = f.file_name() {
+                            let moved = new_dir.join(name);
+                            if moved.is_file() {
+                                s.file = Some(moved);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// True when the tab depends on the project: a script file inside it or a connection that belongs to it.
     pub fn tab_in_project(&self, t: &Tab, project: &str) -> bool {
         let dir = self.sh.store.projects.iter().find(|p| p.id == project).map(|p| p.dir());
@@ -282,6 +372,7 @@ impl App {
         let keep: Vec<bool> = self.tabs.iter().map(|t| !self.tab_in_project(t, project)).collect();
         let mut it = keep.into_iter();
         self.tabs.retain(|_| it.next().unwrap_or(true));
+        crate::shared::release_memory();
         if self.tabs.is_empty() {
             self.active = 0;
         } else if self.active >= self.tabs.len() {
@@ -329,6 +420,8 @@ impl App {
         if self.active >= self.tabs.len() && !self.tabs.is_empty() {
             self.active = self.tabs.len() - 1;
         }
+        // the results of the closed tab are gone: give their memory back
+        crate::shared::release_memory();
     }
 
     fn sql_cmd(&mut self, cmd: SqlCmd) {
@@ -393,9 +486,28 @@ impl App {
                     self.sh.req(Req::NewConn);
                     ui.close();
                 }
+                ui.menu_button("Novo script em…", |ui| {
+                    if ui.button("Scripts soltos").clicked() {
+                        self.new_script_in(None);
+                        ui.close();
+                    }
+                    for (id, name) in self.sh.store.projects.iter().map(|p| (p.id.clone(), p.name.clone())).collect::<Vec<_>>() {
+                        if ui.button(name).clicked() {
+                            self.new_script_in(Some(id));
+                            ui.close();
+                        }
+                    }
+                });
+                if ui.button("Novo projeto…").clicked() {
+                    self.open_new_project_dialog();
+                    ui.close();
+                }
+                if ui.button("Abrir projeto…").clicked() {
+                    self.dialog = Some(Dialog::OpenProject { dir: String::new(), msg: None });
+                    ui.close();
+                }
                 if ui.add(egui::Button::new("Novo script SQL").shortcut_text("Ctrl+]")).clicked() {
-                    let c = self.current_conn();
-                    self.open_sql(c, String::new(), None);
+                    self.new_script_here();
                     ui.close();
                 }
                 if ui.button("Importar dados CSV…").clicked() {
@@ -585,8 +697,26 @@ impl App {
     }
 
     /// Switch the transaction mode of the current connection: the open session and the saved connection both change.
+    /// Entry point of every mode switch from the UI: going to Auto asks first (always when there are pending changes).
+    fn request_tx_mode(&mut self, mode: TxMode) {
+        let Some(c) = self.current_conn() else { return };
+        let Some((cur, _open, stmts, rows)) = self.sh.tx_info(&c) else { return };
+        if needs_auto_commit_confirmation(cur, mode, stmts, rows, self.sh.store.prefs.confirm_auto_commit) {
+            self.dialog = Some(Dialog::ConfirmAutoCommit { conn: c, stmts, rows, dont_ask: false });
+        } else {
+            self.set_tx_mode(mode);
+        }
+    }
+
     fn set_tx_mode(&mut self, mode: TxMode) {
         if let Some(c) = self.current_conn() {
+            self.set_tx_mode_of(&c, mode);
+        }
+    }
+
+    pub fn set_tx_mode_of(&mut self, c: &str, mode: TxMode) {
+        let c = c.to_string();
+        {
             if let Some(s) = self.sh.session(&c) {
                 let res = s.lock().unwrap_or_else(|e| e.into_inner()).set_mode(mode);
                 match res {
@@ -611,7 +741,7 @@ impl App {
                     TxMode::Manual => TxMode::Smart,
                     TxMode::Smart => TxMode::Auto,
                 };
-                self.set_tx_mode(next);
+                self.request_tx_mode(next);
             }
         }
     }
@@ -666,7 +796,7 @@ impl App {
                     ui.add_enabled_ui(!no_tx, |ui| {
                         for m in TxMode::ALL {
                             if icons::segment(ui, Icon::Lock, m.label(), mode == m).on_hover_text("Modo de transação: Auto confirma tudo; Manual abre transação em qualquer instrução; Smart só em instruções que alteram dados").clicked() && mode != m {
-                                self.set_tx_mode(m);
+                                self.request_tx_mode(m);
                             }
                         }
                     });
@@ -689,8 +819,7 @@ impl App {
     fn toolbar_scripts(&mut self, ui: &mut Ui) {
         ui.horizontal_wrapped(|ui| {
             if icons::button(ui, Icon::Script, "Novo script").on_hover_text("Ctrl+]").clicked() {
-                let c = self.current_conn();
-                self.open_sql(c, String::new(), None);
+                self.new_script_here();
             }
             ui.separator();
             let is_sql = matches!(self.tabs.get(self.active), Some(Tab { kind: TabKind::Sql(_), .. }));
@@ -775,6 +904,7 @@ impl App {
 
     fn tab_bar(&mut self, ui: &mut Ui) {
         let mut close: Option<usize> = None;
+        let mut close_others: Option<usize> = None;
         egui::ScrollArea::horizontal().id_salt("tab_scroll").auto_shrink([false, true]).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
@@ -797,21 +927,69 @@ impl App {
                             ui.close();
                         }
                         if ui.button("Fechar as outras").clicked() {
-                            let keep = self.tabs.remove(i);
-                            self.tabs.clear();
-                            self.tabs.push(keep);
-                            self.active = 0;
+                            // applied after the loop: the loop indexes `self.tabs` and must not see it change
+                            close_others = Some(i);
                             ui.close();
                         }
                     });
                 }
             });
         });
-        if let Some(i) = close {
+        if let Some(keep) = close_others {
+            self.close_other_tabs(keep);
+        } else if let Some(i) = close {
             if i < self.tabs.len() {
                 self.close_tab(i);
             }
         }
+    }
+
+    /// Closes every tab but `keep`, saving scripts the same way `close_tab` does.
+    fn close_other_tabs(&mut self, keep: usize) {
+        if keep >= self.tabs.len() {
+            return;
+        }
+        let mut i = self.tabs.len();
+        while i > 0 {
+            i -= 1;
+            if i != keep {
+                self.close_tab(i);
+            }
+        }
+        self.active = 0;
+    }
+
+    /// Blank state shown when the last tab is closed: the app stays open and offers the usual ways to start.
+    fn empty_workspace(&mut self, ui: &mut Ui) {
+        let pl = pal(self.sh.store.prefs.dark);
+        ui.vertical_centered(|ui| {
+            ui.add_space((ui.available_height() * 0.3).max(24.0));
+            ui.label(RichText::new("Nenhuma aba aberta").size(20.0).strong());
+            ui.add_space(4.0);
+            ui.label(RichText::new("Abra um script, conecte a um banco ou volte à tela inicial.").color(pl.weak));
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                let w = 640.0_f32.min(ui.available_width());
+                ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
+                if icons::primary(ui, Icon::Script, "Novo script").on_hover_text("Ctrl+]").clicked() {
+                    self.new_script_here();
+                }
+                if icons::button(ui, Icon::Plug, "Nova conexão").clicked() {
+                    self.sh.req(Req::NewConn);
+                }
+                if icons::button(ui, Icon::Folder, "Novo projeto").clicked() {
+                    self.open_new_project_dialog();
+                }
+                if icons::button(ui, Icon::Folder, "Abrir projeto").clicked() {
+                    self.dialog = Some(Dialog::OpenProject { dir: String::new(), msg: None });
+                }
+                if icons::button(ui, Icon::Home, "Tela inicial").clicked() {
+                    let id = self.sh.fresh_id();
+                    self.tabs.push(Tab { id, kind: TabKind::Welcome });
+                    self.active = self.tabs.len() - 1;
+                }
+            });
+        });
     }
 
     fn welcome(&mut self, ui: &mut Ui) {
@@ -838,8 +1016,7 @@ impl App {
                             self.create_sample();
                         }
                         if icons::button(ui, Icon::Script, "Abrir editor SQL").clicked() {
-                            let c = self.current_conn();
-                            self.open_sql(c, String::new(), None);
+                            self.new_script_here();
                         }
                     });
                     ui.add_space(22.0);
@@ -880,101 +1057,150 @@ impl App {
         });
         ui.add(egui::TextEdit::singleline(&mut self.nav_filter).hint_text("Filtrar tabelas…").desired_width(f32::INFINITY));
         ui.add_space(4.0);
-        let conns: Vec<ConnConfig> = self.sh.store.connections.iter().filter(|c| c.project.is_empty()).cloned().collect();
         let projects = self.sh.store.projects.clone();
+        let nothing = self.sh.store.connections.is_empty() && projects.is_empty();
         egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-            if conns.is_empty() && projects.is_empty() {
+            if nothing {
                 ui.add_space(10.0);
                 ui.label(RichText::new("Nenhuma conexão ainda.").color(pl.weak));
-                if icons::primary(ui, Icon::Plug, "Criar conexão").clicked() {
-                    self.sh.req(Req::NewConn);
-                }
+                ui.horizontal_wrapped(|ui| {
+                    if icons::primary(ui, Icon::Plug, "Criar conexão").clicked() {
+                        self.sh.req(Req::NewConn);
+                    }
+                    if icons::button(ui, Icon::Folder, "Novo projeto").clicked() {
+                        self.open_new_project_dialog();
+                    }
+                });
+                ui.add_space(6.0);
             }
-            let mut folders: Vec<String> = conns.iter().map(|c| c.folder.clone()).filter(|f| !f.is_empty()).collect();
-            folders.sort();
-            folders.dedup();
-            for c in conns.iter().filter(|c| c.folder.is_empty()) {
-                self.conn_node(ui, c);
+            self.project_node(ui, None);
+            for p in projects {
+                self.project_node(ui, Some(&p));
             }
-            for f in folders {
-                egui::CollapsingHeader::new(RichText::new(&f).strong()).id_salt(("folder", &f)).default_open(true).show(ui, |ui| {
-                    for c in conns.iter().filter(|c| c.folder == f) {
+            ui.add_space(8.0);
+            if self.sh.persist {
+                self.scripts_node(ui, None);
+            }
+        });
+    }
+
+    /// A project in the tree: `None` is the default project (the workspace as it was before projects existed).
+    fn project_node(&mut self, ui: &mut Ui, p: Option<&store::Project>) {
+        let pl = pal(self.sh.store.prefs.dark);
+        let pid = p.map(|p| p.id.clone()).unwrap_or_default();
+        let name = p.map(|p| p.name.clone()).unwrap_or_else(|| "Projeto padrão".to_string());
+        let conns: Vec<ConnConfig> = self.sh.store.connections.iter().filter(|c| c.project == pid).cloned().collect();
+        let folders = self.sh.store.folders_of(&pid);
+        let st = CollapsingState::load_with_default_open(ui.ctx(), egui::Id::new(("project", &pid)), true);
+        let hdr = st.show_header(ui, |ui| {
+            let r = icons::tree_row(ui, icons::Lead::Icon(Icon::Folder, pl.accent), None, RichText::new(&name).strong(), &conns.len().to_string(), false, None);
+            let r = match p {
+                Some(p) => r.on_hover_text(format!("Projeto: {}", p.path)),
+                None => r.on_hover_text(format!("Projeto padrão: dados em {}", store::config_dir().display())),
+            };
+            r.context_menu(|ui| self.project_menu(ui, p));
+        });
+        hdr.body(|ui| {
+            for f in &folders {
+                let fid = egui::Id::new(("folder", &pid, f));
+                let n = conns.iter().filter(|c| &c.folder == f).count();
+                let st = CollapsingState::load_with_default_open(ui.ctx(), fid, true);
+                let h = st.show_header(ui, |ui| {
+                    let r = icons::tree_row(ui, icons::Lead::Icon(Icon::Folder, pl.warn), None, RichText::new(f), &n.to_string(), false, None);
+                    r.context_menu(|ui| {
+                        if ui.button("Renomear pasta…").clicked() {
+                            self.dialog = Some(Dialog::Folder { project: pid.clone(), old: Some(f.clone()), name: f.clone(), msg: None });
+                            ui.close();
+                        }
+                        if ui.button("Excluir pasta").on_hover_text("As conexões voltam para a raiz do projeto").clicked() {
+                            self.delete_folder(&pid, f);
+                            ui.close();
+                        }
+                    });
+                });
+                h.body(|ui| {
+                    for c in conns.iter().filter(|c| &c.folder == f) {
                         self.conn_node(ui, c);
                     }
                 });
             }
-            for p in projects {
-                self.project_node(ui, &p);
-            }
-            ui.add_space(8.0);
-            if self.sh.persist {
-                self.scripts_node(ui);
-            }
-        });
-    }
-
-    fn project_node(&mut self, ui: &mut Ui, p: &store::Project) {
-        let pl = pal(self.sh.store.prefs.dark);
-        let conns: Vec<ConnConfig> = self.sh.store.connections.iter().filter(|c| c.project == p.id).cloned().collect();
-        let st = CollapsingState::load_with_default_open(ui.ctx(), egui::Id::new(("project", &p.id)), true);
-        let hdr = st.show_header(ui, |ui| {
-            let r = icons::tree_row(ui, icons::Lead::Icon(Icon::Folder, pl.accent), None, RichText::new(&p.name).strong(), &conns.len().to_string(), false, None);
-            let r = r.on_hover_text(format!("Projeto: {}", p.path));
-            r.context_menu(|ui| self.project_menu(ui, p));
-        });
-        hdr.body(|ui| {
-            if conns.is_empty() {
-                ui.label(RichText::new("(nenhuma conexão)").small().color(pl.weak));
-            }
-            for c in &conns {
+            for c in conns.iter().filter(|c| c.folder.is_empty()) {
                 self.conn_node(ui, c);
             }
+            if conns.is_empty() && folders.is_empty() && p.is_none() {
+                ui.label(RichText::new("(vazio)").small().color(pl.weak));
+            }
+            if let Some(p) = p {
+                self.scripts_node(ui, Some(p));
+            }
         });
     }
 
-    fn project_menu(&mut self, ui: &mut Ui, p: &store::Project) {
-        if ui.button("Renomear…").clicked() {
-            self.dialog = Some(Dialog::RenameProject { id: p.id.clone(), name: p.name.clone(), msg: None });
+    fn delete_folder(&mut self, project: &str, folder: &str) {
+        match self.sh.store.delete_folder(project, folder) {
+            Ok(_) => {
+                self.sh.save();
+                self.toast(format!("Pasta “{}” excluída; as conexões foram para a raiz", folder));
+            }
+            Err(e) => self.toast(e),
+        }
+    }
+
+    pub fn open_new_project_dialog(&mut self) {
+        self.dialog = Some(Dialog::NewProject { name: String::new(), dir: String::new(), dir_edited: false, msg: None });
+    }
+
+    fn project_menu(&mut self, ui: &mut Ui, p: Option<&store::Project>) {
+        let pid = p.map(|p| p.id.clone()).unwrap_or_default();
+        let is_default = p.is_none();
+        let why_default = "O projeto padrão não pode ser renomeado, removido nem excluído; converta-o em um projeto de pasta";
+        let rename = ui.add_enabled(!is_default, egui::Button::new("Renomear…"));
+        let rename = if is_default { rename.on_disabled_hover_text(why_default) } else { rename };
+        if rename.clicked() {
+            if let Some(p) = p {
+                self.dialog = Some(Dialog::RenameProject { id: p.id.clone(), name: p.name.clone(), msg: None });
+            }
+            ui.close();
+        }
+        if is_default && ui.button("Converter em projeto de pasta…").clicked() {
+            self.dialog = Some(Dialog::ConvertDefault { name: "Meu projeto".into(), dir: String::new(), dir_edited: false, msg: None });
             ui.close();
         }
         ui.separator();
         if ui.button("Novo script").clicked() {
-            let dir = p.scripts_dir();
-            let _ = std::fs::create_dir_all(&dir);
-            let mut n = 1;
-            let path = loop {
-                let f = dir.join(format!("novo-{}.sql", n));
-                if !f.exists() {
-                    break f;
-                }
-                n += 1;
-            };
-            if std::fs::write(&path, "").is_ok() {
-                self.open_script_file(&path);
-            }
+            self.new_script_in(Some(pid.clone()));
             ui.close();
         }
         if ui.button("Nova conexão neste projeto…").clicked() {
-            self.sh.req(Req::NewConnIn(p.id.clone()));
+            self.sh.req(if is_default { Req::NewConn } else { Req::NewConnIn(pid.clone()) });
             ui.close();
         }
-        if ui.button("Versionamento (git)…").clicked() {
-            self.open_git_dialog_for(p.dir());
+        if ui.button("Nova pasta…").clicked() {
+            self.dialog = Some(Dialog::Folder { project: pid.clone(), old: None, name: String::new(), msg: None });
             ui.close();
+        }
+        if let Some(p) = p {
+            if ui.button("Versionamento (git)…").clicked() {
+                self.open_git_dialog_for(p.dir());
+                ui.close();
+            }
         }
         ui.separator();
+        let path = p.map(|p| p.dir()).unwrap_or_else(store::config_dir);
         if ui.button("Abrir a pasta").clicked() {
-            crate::shared::open_path(&p.dir());
+            crate::shared::open_path(&path);
             ui.close();
         }
         if ui.button("Copiar o caminho").clicked() {
-            ui.ctx().copy_text(p.path.clone());
+            ui.ctx().copy_text(path.display().to_string());
             ui.close();
         }
         ui.separator();
-        if ui.button("Remover da lista").on_hover_text("Fecha o projeto; a pasta continua no disco").clicked() {
+        let remove = ui.add_enabled(!is_default, egui::Button::new("Remover da lista"));
+        let remove = if is_default { remove.on_disabled_hover_text(why_default) } else { remove.on_hover_text("Fecha o projeto; a pasta continua no disco") };
+        if remove.clicked() {
             for i in 0..self.tabs.len() {
-                if self.tab_in_project(&self.tabs[i], &p.id) {
+                if self.tab_in_project(&self.tabs[i], &pid) {
                     if let TabKind::Sql(sq) = &mut self.tabs[i].kind {
                         if sq.dirty && !sq.text.trim().is_empty() {
                             sq.save_file();
@@ -982,43 +1208,67 @@ impl App {
                     }
                 }
             }
-            self.close_tabs_of_project(&p.id);
-            self.sh.store.close_project(&p.id);
+            self.close_tabs_of_project(&pid);
+            self.sh.store.close_project(&pid);
             self.sh.save();
             ui.close();
         }
-        if ui.button("Excluir a pasta…").clicked() {
-            self.dialog = Some(Dialog::DeleteProject { id: p.id.clone(), msg: None });
+        let del = ui.add_enabled(!is_default, egui::Button::new("Excluir a pasta…"));
+        let del = if is_default { del.on_disabled_hover_text(why_default) } else { del };
+        if del.clicked() {
+            self.dialog = Some(Dialog::DeleteProject { id: pid.clone(), msg: None });
             ui.close();
         }
     }
 
-    fn scripts_node(&mut self, ui: &mut Ui) {
+    /// Creates a script in the project (`None`/empty id = loose scripts) and opens it.
+    pub fn new_script_in(&mut self, project: Option<String>) {
+        let dir = match project.as_deref().filter(|p| !p.is_empty()).and_then(|id| self.sh.store.projects.iter().find(|p| p.id == id)) {
+            Some(p) => p.scripts_dir(),
+            None => self.scripts_dir.clone(),
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        let c = self.current_conn();
+        self.open_sql_in(c, String::new(), None, Some(dir));
+    }
+
+    /// "Novo script": goes to the project of the current connection, loose otherwise.
+    pub fn new_script_here(&mut self) {
+        let c = self.current_conn();
+        let dir = self.sh.store.new_script_dir(c.as_deref(), &self.scripts_dir);
+        self.open_sql_in(c, String::new(), None, Some(dir));
+    }
+
+    /// Scripts of a project (`Some`) or the loose scripts (`None`).
+    fn scripts_node(&mut self, ui: &mut Ui, project: Option<&store::Project>) {
         let pl = pal(self.sh.store.prefs.dark);
-        let dir = self.scripts_dir.clone();
+        let dir = project.map(|p| p.scripts_dir()).unwrap_or_else(|| self.scripts_dir.clone());
+        let pid = project.map(|p| p.id.clone());
+        let label = if project.is_some() { "Scripts" } else { "Scripts soltos" };
         let mut scripts: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
             .map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().map(|e| e == "sql").unwrap_or(false)).collect())
             .unwrap_or_default();
         scripts.sort();
-        let st = CollapsingState::load_with_default_open(ui.ctx(), egui::Id::new("scripts_node"), false);
+        let st = CollapsingState::load_with_default_open(ui.ctx(), egui::Id::new(("scripts_node", pid.clone().unwrap_or_default())), false);
         let open = st.is_open();
-        let changes = if open { self.git_changes() } else { vec![] };
+        let changes = if open && project.is_none() { self.git_changes() } else { vec![] };
         let hdr = st.show_header(ui, |ui| {
-            let r = icons::tree_row(ui, icons::Lead::Icon(Icon::Folder, pl.warn), None, RichText::new("Scripts").strong(), &scripts.len().to_string(), false, None);
+            let r = icons::tree_row(ui, icons::Lead::Icon(Icon::Folder, pl.warn), None, RichText::new(label).strong(), &scripts.len().to_string(), false, None);
             let r = r.on_hover_text(format!("Pasta: {}", dir.display()));
             r.context_menu(|ui| {
                 if ui.button("Novo script").clicked() {
-                    let c = self.current_conn();
-                    self.open_sql(c, String::new(), None);
+                    self.new_script_in(pid.clone());
                     ui.close();
                 }
-                if ui.button("Versionamento (git)…").clicked() {
-                    self.open_git_dialog();
-                    ui.close();
-                }
-                if ui.button("Mudar a pasta dos scripts…").clicked() {
-                    self.dialog = Some(Dialog::Prefs);
-                    ui.close();
+                if project.is_none() {
+                    if ui.button("Versionamento (git)…").clicked() {
+                        self.open_git_dialog();
+                        ui.close();
+                    }
+                    if ui.button("Mudar a pasta dos scripts…").clicked() {
+                        self.dialog = Some(Dialog::Prefs);
+                        ui.close();
+                    }
                 }
                 if ui.button("Abrir a pasta").clicked() {
                     let _ = crate::shared::open_path(&dir);
@@ -1044,7 +1294,7 @@ impl App {
                     Some(_) => "alterado",
                     None => "",
                 };
-                let conn_hint = self.sh.script_conn(&name).map(|c| self.sh.conn_name(&c)).unwrap_or_default();
+                let conn_hint = self.sh.store.script_conn_of(&p).filter(|c| self.sh.cfg(c).is_some()).map(|c| self.sh.conn_name(&c)).unwrap_or_default();
                 let r = icons::tree_row(ui, icons::Lead::Icon(Icon::Script, pl.weak), dot, RichText::new(&name), suffix, false, None);
                 let r = if conn_hint.is_empty() { r } else { r.on_hover_text(format!("Última conexão: {}", conn_hint)) };
                 if r.double_clicked() {
@@ -1060,6 +1310,15 @@ impl App {
                         self.dialog = Some(Dialog::RenameScript { path: p.clone(), name: stem, msg: None });
                         ui.close();
                     }
+                    let targets: Vec<(Option<String>, String)> = std::iter::once((None, "Scripts soltos".to_string())).chain(self.sh.store.projects.iter().map(|x| (Some(x.id.clone()), x.name.clone()))).filter(|(id, _)| *id != pid).collect();
+                    ui.menu_button("Mover para…", |ui| {
+                        for (id, name) in targets {
+                            if ui.button(name).clicked() {
+                                self.move_script_to(&p, id.as_deref());
+                                ui.close();
+                            }
+                        }
+                    });
                     if ui.button("Excluir…").clicked() {
                         self.dialog = Some(Dialog::DeleteScript(p.clone()));
                         ui.close();
@@ -1147,6 +1406,43 @@ impl App {
                         ui.close();
                     }
                 }
+                ui.separator();
+                let projects = self.sh.store.projects.clone();
+                let cur_project = c.project.clone();
+                ui.menu_button("Mover para o projeto", |ui| {
+                    let mut targets: Vec<(String, String)> = vec![(String::new(), "Projeto padrão".to_string())];
+                    targets.extend(projects.iter().map(|p| (p.id.clone(), p.name.clone())));
+                    for (pid, pname) in targets.into_iter().filter(|(pid, _)| *pid != cur_project) {
+                        if ui.button(pname).clicked() {
+                            match self.sh.store.move_connection(&id, &pid) {
+                                Ok(_) => {
+                                    self.sh.save();
+                                    self.toast("Conexão movida");
+                                }
+                                Err(e) => self.toast(e),
+                            }
+                            ui.close();
+                        }
+                    }
+                });
+                let folders = self.sh.store.folders_of(&cur_project);
+                ui.menu_button("Mover para a pasta", |ui| {
+                    if !c.folder.is_empty() && ui.button("(raiz do projeto)").clicked() {
+                        let _ = self.sh.store.move_to_folder(&id, "");
+                        self.sh.save();
+                        ui.close();
+                    }
+                    for f in folders.iter().filter(|f| **f != c.folder) {
+                        if ui.button(f).clicked() {
+                            let _ = self.sh.store.move_to_folder(&id, f);
+                            self.sh.save();
+                            ui.close();
+                        }
+                    }
+                    if folders.is_empty() {
+                        ui.label(RichText::new("Crie pastas no menu do projeto").small().weak());
+                    }
+                });
                 ui.separator();
                 if ui.button("Editar conexão…").clicked() {
                     self.sh.req(Req::EditConn(id.clone()));
@@ -1419,8 +1715,7 @@ impl App {
             }
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::CloseBracket)) {
-            let c = self.current_conn();
-            self.open_sql(c, String::new(), None);
+            self.new_script_here();
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::W)) && !self.tabs.is_empty() {
             let a = self.active;
@@ -1462,7 +1757,7 @@ impl App {
 
         egui::CentralPanel::default().frame(egui::Frame::new().fill(pl.bg)).show(ui, |ui| {
             if self.tabs.is_empty() {
-                self.welcome(ui);
+                self.empty_workspace(ui);
                 return;
             }
             egui::Frame::new().fill(pl.toolbar).inner_margin(egui::Margin { left: 8, right: 8, top: 6, bottom: 0 }).show(ui, |ui| {
@@ -1491,6 +1786,15 @@ impl App {
 
         if self.demo && self.frames == 3 && std::env::var("DBR_DEMO_DIALOG").map(|v| v == "git").unwrap_or(false) {
             self.open_git_dialog();
+        }
+        if self.demo && self.frames == 30 && std::env::var("DBR_SLOW").is_ok() {
+            self.sql_cmd(SqlCmd::Execute);
+        }
+        if self.demo && self.frames == 60 && std::env::var("DBR_CLOSE_ALL").is_ok() {
+            // preview helper: closes every tab the way the tab bar does
+            while !self.tabs.is_empty() {
+                self.close_tab(0);
+            }
         }
         if self.demo && self.frames == 40 && std::env::var("DBR_VP").is_ok() {
             for t in self.tabs.iter_mut() {
@@ -1533,6 +1837,7 @@ impl App {
                 _ => false,
             });
             ctx.request_repaint();
+            let busy = busy && std::env::var("DBR_SLOW").is_err();
             if self.frames >= 120 && !self.shot_requested && !busy {
                 self.shot_requested = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
@@ -1664,5 +1969,27 @@ mod commit_label_tests {
     fn label_shows_statements_and_rows() {
         assert_eq!(commit_label(2, 5), "Commit · 2 instr · 5 reg");
         assert_eq!(commit_label(0, 0), "Commit · 0 instr · 0 reg");
+    }
+}
+
+/// Switching to Auto asks first when the preference is on, and always when changes are pending.
+pub fn needs_auto_commit_confirmation(from: TxMode, to: TxMode, pending_stmts: usize, pending_rows: u64, ask: bool) -> bool {
+    to == TxMode::Auto && from != TxMode::Auto && (pending_stmts > 0 || pending_rows > 0 || ask)
+}
+
+#[cfg(test)]
+mod auto_commit_confirmation_tests {
+    use super::needs_auto_commit_confirmation as need;
+    use crate::db::TxMode::*;
+
+    #[test]
+    fn confirmation_rules() {
+        assert!(need(Manual, Auto, 0, 0, true), "no pending changes, preference on");
+        assert!(need(Smart, Auto, 2, 5, true), "pending changes");
+        assert!(!need(Manual, Auto, 0, 0, false), "dismissed, nothing pending");
+        assert!(need(Manual, Auto, 2, 5, false), "pending changes ask even when dismissed");
+        assert!(!need(Auto, Auto, 0, 0, true), "already Auto");
+        assert!(!need(Auto, Manual, 0, 0, true), "only Auto asks");
+        assert!(!need(Manual, Smart, 3, 3, true));
     }
 }

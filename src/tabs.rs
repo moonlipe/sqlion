@@ -551,6 +551,8 @@ impl SqlTab {
                 } else {
                     if self.clear_on_first {
                         self.results.clear();
+                        // the previous execution's results are freed before the new ones are kept
+                        crate::shared::release_memory();
                         self.clear_on_first = false;
                     }
                     if self.results.len() >= crate::constants::MAX_RESULT_TABS {
@@ -652,6 +654,7 @@ impl SqlTab {
         if let Some(cmd) = self.cmd.take() {
             self.apply_cmd(sh, tab_id, cmd);
         }
+        self.watch_job(ui, sh);
         let h = ui.available_height();
         self.results_h = self.results_h.clamp(80.0, (h - 80.0).max(80.0));
         egui::Panel::bottom(egui::Id::new(("sql_results", tab_id)))
@@ -815,8 +818,44 @@ impl SqlTab {
         });
     }
 
+    /// Asks the running job to stop. When the driver cannot interrupt the statement the tab stops waiting for it.
+    pub fn cancel_job(&mut self, sh: &mut Shared, reason: &str) {
+        let Some(job) = &self.job else { return };
+        match job.cancel(reason) {
+            Ok(true) => {}
+            Ok(false) => {
+                // the driver cannot interrupt: forget the job, the server may still finish it
+                self.job = None;
+                self.error = Some(crate::shared::cancelled_message(reason));
+                self.log("Consulta cancelada (este banco não permite interromper no servidor; a execução pode continuar até terminar)");
+                sh.status = "Consulta cancelada".into();
+            }
+            Err(e) => {
+                self.log(format!("Não foi possível cancelar: {}", e));
+                sh.status = format!("Não foi possível cancelar: {}", e);
+            }
+        }
+    }
+
+    /// Cancels the job when it passes the time limit from the preferences, or when Esc is pressed.
+    fn watch_job(&mut self, ui: &mut Ui, sh: &mut Shared) {
+        let Some(job) = &self.job else { return };
+        if job.cancel_requested() {
+            return;
+        }
+        let limit = sh.store.prefs.query_timeout_secs;
+        let over = limit > 0 && job.started.elapsed().as_secs() >= limit as u64;
+        let esc = self.ac.is_none() && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        if over {
+            self.cancel_job(sh, &format!("limite de {} s atingido", limit));
+        } else if esc {
+            self.cancel_job(sh, "");
+        }
+    }
+
     fn show_results(&mut self, ui: &mut Ui, sh: &mut Shared) {
         let pl = pal(ui.visuals().dark_mode);
+        let mut cancel_clicked = false;
         // result tab strip
         ui.horizontal(|ui| {
             let mut close: Option<usize> = None;
@@ -836,6 +875,7 @@ impl SqlTab {
             }
             if let Some(i) = close {
                 self.results.remove(i);
+                crate::shared::release_memory();
                 self.sel = if self.results.is_empty() { ResSel::Stats } else { ResSel::Data(self.results.len() - 1) };
             }
             if icons::segment(ui, Icon::Plan, "Estatísticas", matches!(self.sel, ResSel::Stats)).clicked() {
@@ -844,11 +884,19 @@ impl SqlTab {
             if icons::segment(ui, Icon::Text, "Saída", matches!(self.sel, ResSel::Output)).clicked() {
                 self.sel = ResSel::Output;
             }
-            if self.job.is_some() {
+            if let Some(j) = &self.job {
                 ui.spinner();
-                ui.label(RichText::new("executando…").color(pl.weak));
+                let secs = j.started.elapsed().as_secs_f32();
+                let txt = if j.cancel_requested() { format!("cancelando… {:.0} s", secs) } else { format!("executando… {:.0} s", secs) };
+                ui.label(RichText::new(txt).color(pl.weak));
+                if !j.cancel_requested() && icons::button(ui, Icon::Cross, "Cancelar").on_hover_text("Interrompe a consulta no servidor (Esc)").clicked() {
+                    cancel_clicked = true;
+                }
             }
         });
+        if cancel_clicked {
+            self.cancel_job(sh, "");
+        }
         if let Some(e) = &self.error {
             egui::Frame::new().fill(pl.err.gamma_multiply(0.15)).corner_radius(6.0).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -1213,6 +1261,7 @@ impl TableTab {
                             g.sort = sort;
                             g.mode = mode;
                             self.grid = Some(g);
+                            crate::shared::release_memory();
                         }
                         self.loaded = true;
                     }
