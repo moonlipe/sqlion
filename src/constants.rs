@@ -91,6 +91,10 @@ impl ConnType {
     }
 }
 
+/// Mouse wheel speed: multiplier of egui's 40 px per line step (2× the speed of Sqlion 0.2.0), adjustable 0.5–5.
+pub const SCROLL_SPEED: f32 = 2.0;
+pub const SCROLL_SPEED_RANGE: std::ops::RangeInclusive<f32> = 0.5..=5.0;
+
 #[cfg(test)]
 mod tests {
     use super::*;

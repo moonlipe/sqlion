@@ -184,6 +184,52 @@ pub struct MetaMsg {
 }
 
 /// The schema a connection works in when the SQL does not name one.
+/// Navigator folders whose objects have source code that F4 and the editor menu can open.
+const CODE_KEYS: &[&str] = &["procedure", "function", "aggregate", "trigger", "matview", "event"];
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ObjKind {
+    Table,
+    View,
+    /// object of a navigator folder (`key`), opened through its source code
+    Code { key: String, detail: String },
+}
+
+/// A database object found by name.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObjRef {
+    pub conn: String,
+    pub schema: String,
+    pub name: String,
+    pub kind: ObjKind,
+}
+
+impl ObjRef {
+    pub fn kind_label(&self) -> &'static str {
+        match &self.kind {
+            ObjKind::Table => "tabela",
+            ObjKind::View => "view",
+            ObjKind::Code { key, .. } => match key.as_str() {
+                "procedure" => "procedure",
+                "function" | "aggregate" => "função",
+                "trigger" => "gatilho",
+                "matview" => "view materializada",
+                "event" => "evento",
+                _ => "objeto",
+            },
+        }
+    }
+
+    /// The request that opens it: the table tab, or the source code (views too).
+    pub fn open_req(&self) -> Req {
+        match &self.kind {
+            ObjKind::Table => Req::OpenTable { conn: self.conn.clone(), schema: self.schema.clone(), table: self.name.clone(), view: false },
+            ObjKind::View => Req::OpenSource { conn: self.conn.clone(), schema: self.schema.clone(), key: "view".into(), name: self.name.clone(), detail: String::new() },
+            ObjKind::Code { key, detail } => Req::OpenSource { conn: self.conn.clone(), schema: self.schema.clone(), key: key.clone(), name: self.name.clone(), detail: detail.clone() },
+        }
+    }
+}
+
 fn pick_default_schema(kind: Kind, cfg_db: &str, sch: &[String]) -> String {
     match kind {
         Kind::Sqlite => "main".into(),
@@ -477,6 +523,44 @@ impl Shared {
         pick_default_schema(kind, &cfg_db, &sch)
     }
 
+    /// Finds a database object by name (case-insensitive): the given schema, or the default schema and then the
+    /// other known ones; tables and views first, then the objects with source code. `query = false` looks only at
+    /// what is already cached (never waits for the database).
+    pub fn find_object(&mut self, conn: &str, schema: Option<&str>, name: &str, query: bool) -> Option<ObjRef> {
+        let kind = self.kind(conn);
+        let mut cands: Vec<String> = Vec::new();
+        match schema {
+            Some(s) => {
+                let known = if query { self.ensure_schemas(conn) } else { self.schemas.get(conn).cloned().unwrap_or_default() };
+                // the schema as written, or its case-insensitive match
+                cands.push(known.iter().find(|k| k.eq_ignore_ascii_case(s)).cloned().unwrap_or_else(|| s.to_string()));
+            }
+            None => {
+                let known = if query { self.ensure_schemas(conn) } else { self.schemas.get(conn).cloned().unwrap_or_default() };
+                let cfg_db = self.cfg(conn).map(|c| c.database.clone()).unwrap_or_default();
+                let def = pick_default_schema(kind, &cfg_db, &known);
+                cands.push(def.clone());
+                cands.extend(known.into_iter().filter(|s| *s != def));
+            }
+        }
+        for s in &cands {
+            let tables = if query { Some(self.ensure_tables(conn, s)) } else { self.tables.get(&(conn.to_string(), s.clone())).cloned() };
+            if let Some((t, view)) = tables.unwrap_or_default().into_iter().find(|(t, _)| t.eq_ignore_ascii_case(name)) {
+                return Some(ObjRef { conn: conn.into(), schema: s.clone(), name: t, kind: if view { ObjKind::View } else { ObjKind::Table } });
+            }
+        }
+        let keys: Vec<&str> = crate::db::schema_folders(kind).into_iter().map(|f| f.key).filter(|k| CODE_KEYS.contains(k)).collect();
+        for s in &cands {
+            for key in &keys {
+                let objs = if query { Some(self.ensure_objects(conn, s, key)) } else { self.objects.get(&(conn.to_string(), s.clone(), key.to_string())).cloned() };
+                if let Some(o) = objs.unwrap_or_default().into_iter().find(|o| o.name.eq_ignore_ascii_case(name)) {
+                    return Some(ObjRef { conn: conn.into(), schema: s.clone(), name: o.name, kind: ObjKind::Code { key: key.to_string(), detail: o.detail } });
+                }
+            }
+        }
+        None
+    }
+
     pub fn qualified(&self, id: &str, schema: &str, table: &str) -> String {
         let k = self.kind(id);
         if k == Kind::Mongo {
@@ -546,6 +630,38 @@ pub fn release_memory() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_conn() -> (Shared, String) {
+        let p = std::env::temp_dir().join(format!("dbr-find-{}.sqlite", crate::store::new_project_id()));
+        crate::sample::create(&p).unwrap();
+        let mut c = ConnConfig::new(Kind::Sqlite);
+        c.database = p.to_string_lossy().to_string();
+        let id = c.id.clone();
+        let mut sh = Shared::new(crate::store::Store::memory(), false, egui::Context::default());
+        sh.store.connections.push(c);
+        sh.connect(&id).unwrap();
+        (sh, id)
+    }
+
+    #[test]
+    fn objects_are_found_by_name() {
+        let (mut sh, id) = sample_conn();
+        // nothing cached yet: the menu path never queries
+        assert_eq!(sh.find_object(&id, None, "orders", false), None);
+        assert!(sh.tables.is_empty() && sh.objects.is_empty(), "cache-only lookup must not query");
+        let t = sh.find_object(&id, None, "ORDERS", true).unwrap();
+        assert_eq!((t.schema.as_str(), t.name.as_str(), &t.kind), ("main", "orders", &ObjKind::Table));
+        assert!(matches!(t.open_req(), Req::OpenTable { view: false, .. }));
+        let v = sh.find_object(&id, Some("main"), "customer_totals", true).unwrap();
+        assert_eq!(v.kind, ObjKind::View);
+        assert!(matches!(v.open_req(), Req::OpenSource { ref key, .. } if key == "view"));
+        let g = sh.find_object(&id, None, "trg_order_items_stock", true).unwrap();
+        assert!(matches!(&g.kind, ObjKind::Code { key, .. } if key == "trigger"));
+        assert_eq!(g.kind_label(), "gatilho");
+        assert_eq!(sh.find_object(&id, None, "nao_existe", true), None);
+        // now cached: found without querying
+        assert_eq!(sh.find_object(&id, None, "orders", false).map(|o| o.name), Some("orders".into()));
+    }
 
     #[test]
     fn script_remembers_the_connection_it_last_ran_on() {

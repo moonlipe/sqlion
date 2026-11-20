@@ -42,6 +42,33 @@ pub enum SqlCmd {
     Lower,
     Complete,
     Save,
+    /// F4: open the object under the cursor or selected
+    OpenObject,
+}
+
+/// Page Up/Down from char `from`: one visible page (`view_h`, whole rows) up or down, keeping the column
+/// (`h_pos`, else the cursor's x). Before the first row it goes to the start, past the last one to the end.
+/// Returns the new char index, the column x used and how far (in points) the cursor moved.
+pub fn page_target(galley: &egui::Galley, from: usize, view_h: f32, down: bool, h_pos: Option<f32>) -> (usize, f32, f32) {
+    let r = galley.pos_from_cursor(CCursor::new(from));
+    let row_h = r.height().max(1.0);
+    let page = (view_h / row_h).floor().max(1.0) * row_h;
+    let x = h_pos.unwrap_or(r.left());
+    let y = r.center().y + if down { page } else { -page };
+    let to = if y < 0.0 {
+        0
+    } else if y > galley.rect.bottom() {
+        galley.text().chars().count()
+    } else {
+        galley.cursor_from_pos(egui::vec2(x, y)).index.into()
+    };
+    let moved = galley.pos_from_cursor(CCursor::new(to)).top() - r.top();
+    (to, x, moved)
+}
+
+/// Id of the text editor of an SQL tab.
+pub fn editor_id(tab_id: u64) -> egui::Id {
+    egui::Id::new(("sql_edit", tab_id))
 }
 
 // ---------------------------------------------------------------- highlighting
@@ -191,6 +218,8 @@ pub struct SqlTab {
     pub focus_editor: bool,
     /// table/column names for the highlighting, rebuilt only when the metadata or the cited tables change
     pub hl: Option<HlCache>,
+    /// object under the right click of the open editor menu (resolved once, from the cached metadata)
+    pub ctx_obj: Option<ObjRef>,
 }
 
 pub struct HlCache {
@@ -232,6 +261,7 @@ impl SqlTab {
             set_scroll: None,
             focus_editor: false,
             hl: None,
+            ctx_obj: None,
         }
     }
 
@@ -745,6 +775,108 @@ impl SqlTab {
                 }
             }
             SqlCmd::Save => self.save_file(),
+            SqlCmd::OpenObject => self.open_object(sh),
+        }
+    }
+
+    /// Right click at char `at`: inside the selection keeps it, elsewhere moves the cursor there (returned).
+    /// Resolves the object of the menu from the cached metadata only.
+    pub fn right_click_at(&mut self, sh: &mut Shared, at: usize) -> Option<usize> {
+        let (lo, hi) = (self.cursor.0.min(self.cursor.1), self.cursor.0.max(self.cursor.1));
+        let moved = if lo != hi && (lo..=hi).contains(&at) {
+            None
+        } else {
+            self.cursor = (at, at);
+            Some(at)
+        };
+        self.ctx_obj = match (self.conn.clone(), self.object_name_at_cursor()) {
+            (Some(c), Some((schema, name))) if sh.is_connected(&c) => sh.find_object(&c, schema.as_deref(), &name, false),
+            _ => None,
+        };
+        moved
+    }
+
+    fn editor_menu(&mut self, ui: &mut Ui, sh: &mut Shared, id: egui::Id, state: &egui::text_edit::TextEditState) {
+        let (a, b) = self.sel_range_bytes();
+        let has_sel = a != b;
+        let item = |ui: &mut Ui, enabled: bool, label: &str, keys: &str| ui.add_enabled(enabled, egui::Button::new(label).shortcut_text(keys)).clicked();
+        let mut cmd = None;
+        if item(ui, has_sel, "Recortar", "Ctrl+X") {
+            ui.ctx().copy_text(self.text[a..b].to_string());
+            let start = self.text[..a].chars().count();
+            self.text.replace_range(a..b, "");
+            self.set_cursor = Some(start);
+            self.dirty = true;
+            ui.close();
+        }
+        if item(ui, has_sel, "Copiar", "Ctrl+C") {
+            ui.ctx().copy_text(self.text[a..b].to_string());
+            ui.close();
+        }
+        if item(ui, true, "Colar", "Ctrl+V") {
+            // the clipboard is read by the platform: it comes back as a paste event into the focused editor
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+            ui.close();
+        }
+        if item(ui, !self.text.is_empty(), "Selecionar tudo", "Ctrl+A") {
+            let mut st = state.clone();
+            let n = self.text.chars().count();
+            st.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(0), CCursor::new(n))));
+            st.store(ui.ctx(), id);
+            self.cursor = (n, 0);
+            ui.close();
+        }
+        ui.separator();
+        for (label, keys, c) in [
+            ("Executar instrução", "Ctrl+Enter", SqlCmd::Execute),
+            ("Executar script", "Alt+X", SqlCmd::Script),
+            ("Formatar", "Ctrl+Shift+F", SqlCmd::Format),
+            ("Comentar / descomentar", "Ctrl+/", SqlCmd::Comment),
+            ("Abrir objeto", "F4", SqlCmd::OpenObject),
+        ] {
+            if item(ui, true, label, keys) {
+                cmd = Some(c);
+                ui.close();
+            }
+        }
+        if let Some(o) = self.ctx_obj.clone() {
+            ui.separator();
+            ui.label(RichText::new(format!("{} ({})", o.name, o.kind_label())).strong());
+            crate::objmenu::object_menu(ui, sh, &o);
+        }
+        if cmd.is_some() {
+            self.cmd = cmd;
+        }
+        // the editor keeps the keyboard after a menu action (paste needs it)
+        self.focus_editor = true;
+    }
+
+    /// Name under the cursor, or the whole selection when it is a name.
+    pub fn object_name_at_cursor(&self) -> Option<sqltext::ObjName> {
+        let (a, b) = self.sel_range_bytes();
+        if a != b {
+            sqltext::ident_in(&self.text[a..b])
+        } else {
+            sqltext::ident_at(&self.text, self.cursor.0)
+        }
+    }
+
+    /// F4: opens the table tab, or the source code of a view, procedure, function...
+    fn open_object(&mut self, sh: &mut Shared) {
+        let Some((schema, name)) = self.object_name_at_cursor() else {
+            sh.status = "F4: nenhum nome de objeto sob o cursor".into();
+            return;
+        };
+        let Some(conn) = self.conn.clone().filter(|c| sh.session(c).is_some()) else {
+            sh.status = format!("F4: a conexão do script está fechada; conecte-a para abrir \"{}\"", name);
+            return;
+        };
+        match sh.find_object(&conn, schema.as_deref(), &name, true) {
+            Some(o) => {
+                sh.status = format!("Abrindo {} {}", o.kind_label(), o.name);
+                sh.req(o.open_req());
+            }
+            None => sh.status = format!("Objeto não encontrado: {}", name),
         }
     }
 
@@ -817,6 +949,13 @@ impl SqlTab {
                 }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
                     ac.sel = (ac.sel + n - 1) % n;
+                }
+                // a page of the list (it shows about ten items)
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::PageDown) {
+                    ac.sel = (ac.sel + 10).min(n - 1);
+                }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::PageUp) {
+                    ac.sel = ac.sel.saturating_sub(10);
                 }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) || i.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
                     accept = ac.items.get(ac.sel).cloned();
@@ -897,12 +1036,26 @@ impl SqlTab {
         if let Some(y) = self.set_scroll.take() {
             area = area.vertical_scroll_offset(y);
         }
+        // Page Up / Page Down (Shift extends the selection): the text editor does not handle them itself
+        let mut page: Option<(bool, bool)> = None;
+        if self.ac.is_none() && ui.memory(|m| m.has_focus(editor_id(tab_id))) {
+            ui.input_mut(|i| {
+                for (key, down) in [(egui::Key::PageDown, true), (egui::Key::PageUp, false)] {
+                    // Shift first: a plain consume_key also matches when Shift is held
+                    if i.consume_key(egui::Modifiers::SHIFT, key) {
+                        page = Some((down, true));
+                    } else if i.consume_key(egui::Modifiers::NONE, key) {
+                        page = Some((down, false));
+                    }
+                }
+            });
+        }
         let scrolled = area.show(ui, |ui| {
             let mut layouter = |ui: &Ui, text: &dyn egui::TextBuffer, wrap: f32| {
                 let job = highlight(text.as_str(), &sql_pal, size, wrap, hl_names.as_deref());
                 ui.fonts_mut(|f| f.layout_job(job))
             };
-            let id = egui::Id::new(("sql_edit", tab_id));
+            let id = editor_id(tab_id);
             if let Some(pos) = self.set_cursor.take() {
                 let mut st = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
                 st.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(pos))));
@@ -938,12 +1091,36 @@ impl SqlTab {
             if let Some(r) = out.cursor_range {
                 self.cursor = (r.primary.index.into(), r.secondary.index.into());
             }
+            if let Some((down, shift)) = page {
+                let h_pos = out.state.cursor.char_range().and_then(|r| r.h_pos);
+                let (to, x, moved) = page_target(&out.galley, self.cursor.0, editor_h, down, h_pos);
+                let anchor = if shift { self.cursor.1 } else { to };
+                let mut st = out.state.clone();
+                st.cursor.set_char_range(Some(CCursorRange { primary: CCursor::new(to), secondary: CCursor::new(anchor), h_pos: Some(x) }));
+                st.store(ui.ctx(), id);
+                self.cursor = (to, anchor);
+                // the view moves by the same distance, so the cursor stays at the same place on the screen
+                self.set_scroll = Some((self.scroll_y + moved).max(0.0));
+                ui.ctx().request_repaint();
+            }
             if let Some(pos) = pair_cursor.filter(|_| out.response.changed()) {
                 let mut st = out.state.clone();
                 st.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(pos))));
                 st.store(ui.ctx(), id);
                 self.cursor = (pos, pos);
             }
+            // context menu: a right click outside the selection moves the cursor first
+            if out.response.secondary_clicked() {
+                if let Some(p) = ui.ctx().pointer_interact_pos() {
+                    let at: usize = out.galley.cursor_from_pos(p - out.galley_pos).index.into();
+                    if let Some(c) = self.right_click_at(sh, at) {
+                        let mut st = out.state.clone();
+                        st.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(c))));
+                        st.store(ui.ctx(), id);
+                    }
+                }
+            }
+            out.response.context_menu(|ui| self.editor_menu(ui, sh, id, &out.state));
             // autocomplete popup
             if let Some(ac) = &self.ac {
                 if !ac.items.is_empty() {
@@ -2340,5 +2517,142 @@ mod editor_tests {
         let (names, stmts) = req.expect("the dialog is asked for");
         assert_eq!(names, vec!["${tabela_x}".to_string(), "p".to_string()], "a variable defined by @set is not asked for");
         assert!(stmts[0].starts_with("select 3, ${tabela_x}"));
+    }
+
+    fn f4(sh: &mut Shared, conn: Option<String>, text: &str, at: usize, sel_end: Option<usize>) -> Option<Req> {
+        let mut t = SqlTab::new(conn, text.into(), "t".into());
+        t.cursor = (sel_end.unwrap_or(at), at);
+        sh.requests.clear();
+        t.apply_cmd(sh, 1, SqlCmd::OpenObject);
+        sh.requests.pop()
+    }
+
+    #[test]
+    fn f4_opens_the_table_or_the_definition() {
+        let (mut sh, id) = sqlite();
+        let c = Some(id.clone());
+        let q = "SELECT * FROM orders o JOIN customer_totals t ON 1 = 1";
+        let at = |w: &str| q.find(w).unwrap() + 2;
+        assert!(matches!(f4(&mut sh, c.clone(), q, at("orders"), None), Some(Req::OpenTable { ref table, view: false, .. }) if table == "orders"));
+        assert!(matches!(f4(&mut sh, c.clone(), q, at("customer_totals"), None), Some(Req::OpenSource { ref key, ref name, .. }) if key == "view" && name == "customer_totals"));
+        // a selection made of a name
+        let s = q.find("orders").unwrap();
+        assert!(matches!(f4(&mut sh, c.clone(), q, s, Some(s + 6)), Some(Req::OpenTable { .. })));
+        // a trigger opens its source
+        assert!(matches!(f4(&mut sh, c.clone(), "trg_order_items_stock", 3, None), Some(Req::OpenSource { ref key, .. }) if key == "trigger"));
+        // unknown name, keyword, closed connection: nothing opens and the status says why
+        assert!(f4(&mut sh, c.clone(), "SELECT * FROM nada_disso", 17, None).is_none());
+        assert!(sh.status.contains("não encontrado"), "{}", sh.status);
+        assert!(f4(&mut sh, c.clone(), q, 2, None).is_none());
+        assert!(f4(&mut sh, None, q, at("orders"), None).is_none());
+        assert!(sh.status.contains("fechada"), "{}", sh.status);
+    }
+
+    #[test]
+    fn right_click_keeps_the_selection_and_finds_the_object_from_the_cache() {
+        let (mut sh, id) = sqlite();
+        let q = "SELECT * FROM orders";
+        let mut t = SqlTab::new(Some(id.clone()), q.into(), "t".into());
+        t.cursor = (20, 14);
+        assert_eq!(t.right_click_at(&mut sh, 16), None, "inside the selection: nothing moves");
+        assert_eq!(t.cursor, (20, 14));
+        assert_eq!(t.ctx_obj, None, "metadata not loaded yet: the menu does not wait for it");
+        assert!(sh.tables.is_empty(), "and does not query");
+        sh.find_object(&id, None, "orders", true);
+        t.right_click_at(&mut sh, 16);
+        assert_eq!(t.ctx_obj.as_ref().map(|o| (o.name.as_str(), o.kind_label())), Some(("orders", "tabela")));
+        assert_eq!(t.right_click_at(&mut sh, 2), Some(2), "outside the selection the cursor moves");
+        assert_eq!((t.cursor, t.ctx_obj.clone()), ((2, 2), None), "a keyword has no object section");
+    }
+
+    #[test]
+    fn a_right_click_in_the_editor_resolves_the_word_clicked() {
+        let (mut sh, id) = sqlite();
+        sh.find_object(&id, None, "orders", true);
+        let text = "orders ".repeat(40) + "\n";
+        let mut t = SqlTab::new(Some(id.clone()), text.repeat(20), "t".into());
+        let ctx = egui::Context::default();
+        let mut time = 0.0;
+        frame(&ctx, &mut sh, &mut t, vec![], &mut time);
+        let at = Pos2::new(300.0, 100.0);
+        let btn = |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE };
+        frame(&ctx, &mut sh, &mut t, vec![Event::PointerMoved(at)], &mut time);
+        frame(&ctx, &mut sh, &mut t, vec![btn(true)], &mut time);
+        frame(&ctx, &mut sh, &mut t, vec![btn(false)], &mut time);
+        frame(&ctx, &mut sh, &mut t, vec![], &mut time);
+        assert!(t.cursor.0 > 0 && t.cursor.0 == t.cursor.1, "the cursor went to the click: {:?}", t.cursor);
+        assert_eq!(t.ctx_obj.map(|o| o.name), Some("orders".into()));
+    }
+
+    fn line_col(text: &str, at: usize) -> (usize, usize) {
+        let before: String = text.chars().take(at).collect();
+        (before.matches('\n').count(), before.chars().rev().take_while(|c| *c != '\n').count())
+    }
+
+    fn page_key(ctx: &egui::Context, sh: &mut Shared, t: &mut SqlTab, key: egui::Key, shift: bool, time: &mut f64) {
+        let modifiers = if shift { egui::Modifiers::SHIFT } else { egui::Modifiers::NONE };
+        frame(ctx, sh, t, vec![Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }], time);
+        frame(ctx, sh, t, vec![], time);
+    }
+
+    fn paged_editor(at: usize) -> (Shared, egui::Context, SqlTab, f64) {
+        let (mut sh, _) = sqlite();
+        let text: String = (0..200).map(|i| format!("{:03} abcdefghij\n", i)).collect();
+        let mut t = SqlTab::new(None, text, "t".into());
+        t.set_cursor = Some(at);
+        t.cursor = (at, at);
+        t.focus_editor = true;
+        let ctx = egui::Context::default();
+        let mut time = 0.0;
+        frame(&ctx, &mut sh, &mut t, vec![], &mut time);
+        frame(&ctx, &mut sh, &mut t, vec![], &mut time);
+        (sh, ctx, t, time)
+    }
+
+    #[test]
+    fn page_down_and_up_move_one_visible_page_keeping_the_column() {
+        let start = 10 * 15 + 5; // line 10, column 5 (each line is 15 chars)
+        let (mut sh, ctx, mut t, mut time) = paged_editor(start);
+        page_key(&ctx, &mut sh, &mut t, egui::Key::PageDown, false, &mut time);
+        let (l1, c1) = line_col(&t.text, t.cursor.0);
+        assert!(l1 > 15, "a page is several lines: {}", l1);
+        assert_eq!(c1, 5, "same column");
+        assert_eq!(t.cursor.0, t.cursor.1, "no selection without Shift");
+        assert!(t.scroll_y > 0.0, "the view follows the cursor");
+        let page = l1 - 10;
+        page_key(&ctx, &mut sh, &mut t, egui::Key::PageDown, false, &mut time);
+        assert_eq!(line_col(&t.text, t.cursor.0), (l1 + page, 5), "every page has the same size");
+        page_key(&ctx, &mut sh, &mut t, egui::Key::PageUp, false, &mut time);
+        page_key(&ctx, &mut sh, &mut t, egui::Key::PageUp, false, &mut time);
+        assert_eq!(line_col(&t.text, t.cursor.0), (10, 5));
+        page_key(&ctx, &mut sh, &mut t, egui::Key::PageUp, false, &mut time);
+        assert_eq!(t.cursor.0, 0, "less than a page from the top: the start of the text");
+    }
+
+    #[test]
+    fn shift_page_down_selects_and_the_end_is_the_limit() {
+        let start = 10 * 15 + 5;
+        let (mut sh, ctx, mut t, mut time) = paged_editor(start);
+        page_key(&ctx, &mut sh, &mut t, egui::Key::PageDown, true, &mut time);
+        assert_eq!(t.cursor.1, start, "the selection starts where the cursor was");
+        assert!(t.cursor.0 > start);
+        let n = t.text.chars().count();
+        let (mut sh, ctx, mut t, mut time) = paged_editor(n - 20);
+        page_key(&ctx, &mut sh, &mut t, egui::Key::PageDown, false, &mut time);
+        assert_eq!(t.cursor.0, n, "less than a page from the end: the end of the text");
+    }
+
+    #[test]
+    fn page_keys_move_the_completion_list_when_it_is_open() {
+        let (mut sh, ctx, mut t, mut time) = paged_editor(3);
+        t.ac = Some(Ac { items: (0..30).map(|i| format!("item{}", i)).collect(), sel: 0, start_char: 3 });
+        page_key(&ctx, &mut sh, &mut t, egui::Key::PageDown, false, &mut time);
+        assert_eq!(t.ac.as_ref().map(|a| a.sel), Some(10));
+        assert_eq!(t.cursor.0, 3, "the text cursor does not move");
+        page_key(&ctx, &mut sh, &mut t, egui::Key::PageDown, false, &mut time);
+        page_key(&ctx, &mut sh, &mut t, egui::Key::PageDown, false, &mut time);
+        assert_eq!(t.ac.as_ref().map(|a| a.sel), Some(29), "stops at the last item");
+        page_key(&ctx, &mut sh, &mut t, egui::Key::PageUp, false, &mut time);
+        assert_eq!(t.ac.as_ref().map(|a| a.sel), Some(19));
     }
 }

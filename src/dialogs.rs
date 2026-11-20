@@ -38,6 +38,29 @@ pub enum Dialog {
     DeleteScript(std::path::PathBuf),
     About,
     Shortcuts,
+    /// F3: scripts of a folder (a project's or the loose ones), most recent first
+    PickScript { dir: std::path::PathBuf, items: Vec<std::path::PathBuf>, filter: String, sel: usize },
+}
+
+/// `.sql` files of `dir`, most recently modified first.
+pub fn list_scripts(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut v: Vec<(std::time::SystemTime, std::path::PathBuf)> = std::fs::read_dir(dir)
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().map(|e| e == "sql").unwrap_or(false))
+                .map(|p| (std::fs::metadata(&p).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH), p))
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    v.into_iter().map(|(_, p)| p).collect()
+}
+
+/// Scripts whose file name contains `filter` (case-insensitive).
+pub fn filter_scripts<'a>(items: &'a [std::path::PathBuf], filter: &str) -> Vec<&'a std::path::PathBuf> {
+    let f = filter.trim().to_lowercase();
+    items.iter().filter(|p| f.is_empty() || p.file_name().map(|n| n.to_string_lossy().to_lowercase().contains(&f)).unwrap_or(false)).collect()
 }
 
 fn status_label(ui: &mut egui::Ui, m: &Option<Result<String, String>>) {
@@ -939,6 +962,10 @@ impl App {
                         ui.label("Tamanho da fonte");
                         ui.add(egui::Slider::new(&mut p.font_size, 10.0..=22.0));
                         ui.end_row();
+                        ui.label("Velocidade de rolagem");
+                        ui.add(egui::Slider::new(&mut p.scroll_speed, crate::constants::SCROLL_SPEED_RANGE).step_by(0.25).suffix("×"))
+                            .on_hover_text("Distância de cada passo da roda do mouse (2× é o padrão). Touchpads de precisão mantêm a velocidade do sistema.");
+                        ui.end_row();
                         ui.label("Linhas por página de resultado");
                         let mut n = p.max_rows as u32;
                         ui.add(egui::DragValue::new(&mut n).range(1..=1_000_000));
@@ -1054,7 +1081,11 @@ impl App {
                             ("Ctrl+Shift+F", "Formatar SQL"),
                             ("Ctrl+/", "Comentar / descomentar"),
                             ("Ctrl+Espaço", "Autocompletar"),
-                            ("Ctrl+]", "Novo script SQL"),
+                            ("Ctrl+T / Ctrl+]", "Novo script SQL"),
+                            ("F3", "Escolher um script do projeto"),
+                            ("F4", "Abrir o objeto sob o cursor (tabela ou definição)"),
+                            ("Ctrl+B", "Mostrar / recolher o navegador"),
+                            ("Page Up / Page Down", "Página acima / abaixo no editor (Shift seleciona)"),
                             ("Ctrl+S", "Salvar script"),
                             ("Ctrl+W", "Fechar aba"),
                             ("F5", "Atualizar navegador"),
@@ -1066,6 +1097,72 @@ impl App {
                         }
                     });
                 });
+                if !open {
+                    keep = false;
+                }
+            }
+            Dialog::PickScript { dir, items, filter, sel } => {
+                let mut open = true;
+                let project = self.sh.store.project_of_script(&dir.join("x.sql")).map(|p| (p.id.clone(), p.name.clone()));
+                let title = match &project {
+                    Some((_, n)) => format!("Scripts — {}", n),
+                    None => "Scripts soltos".to_string(),
+                };
+                let shown: Vec<std::path::PathBuf> = filter_scripts(items, filter).into_iter().cloned().collect();
+                let n = shown.len();
+                let (mut pick, mut new_script) = (None, false);
+                ctx.input_mut(|i| {
+                    if n > 0 && i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                        *sel = (*sel + 1).min(n - 1);
+                    }
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                        *sel = sel.saturating_sub(1);
+                    }
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
+                        pick = shown.get(*sel).cloned();
+                    }
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                        open = false;
+                    }
+                });
+                win(ctx, &title).open(&mut open).collapsible(false).default_size([420.0, 360.0]).show(ctx, |ui| {
+                    let r = ui.add(egui::TextEdit::singleline(filter).hint_text("Filtrar por nome…").desired_width(f32::INFINITY));
+                    r.request_focus();
+                    if r.changed() {
+                        *sel = 0;
+                    }
+                    ui.add_space(4.0);
+                    if items.is_empty() {
+                        ui.label("Não há scripts nesta pasta.");
+                        new_script = ui.button("Novo script").clicked();
+                    } else if shown.is_empty() {
+                        ui.label("Nenhum script com esse nome.");
+                    }
+                    egui::ScrollArea::vertical().auto_shrink([false, true]).max_height(300.0).show(ui, |ui| {
+                        for (i, p) in shown.iter().enumerate() {
+                            let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                            let r = ui.add(egui::Button::selectable(i == *sel, name).min_size(egui::vec2(ui.available_width(), 0.0)));
+                            if i == *sel {
+                                r.scroll_to_me(None);
+                            }
+                            if r.clicked() {
+                                *sel = i;
+                            }
+                            if r.double_clicked() {
+                                pick = Some(p.clone());
+                            }
+                        }
+                    });
+                    ui.label(RichText::new("↑↓ escolhe · Enter abre · Esc fecha").small().color(crate::theme::pal(ui.visuals().dark_mode).weak));
+                });
+                if let Some(p) = pick {
+                    self.open_script_file(&p);
+                    keep = false;
+                }
+                if new_script {
+                    self.new_script_in(project.map(|p| p.0));
+                    keep = false;
+                }
                 if !open {
                     keep = false;
                 }

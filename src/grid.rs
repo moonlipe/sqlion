@@ -889,6 +889,7 @@ fn show_grid_table(ui: &mut Ui, g: &mut GridState, null_text: &str, actions: &mu
             ui.painter().rect_filled(rect, 0.0, pl.header);
             ui.painter().line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, pl.border));
         });
+        #[allow(clippy::needless_range_loop)] // `c` is also the column id of the header widgets
         for c in 0..ncols {
             h.col(|ui| {
                 let rect = ui.max_rect();

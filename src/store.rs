@@ -66,6 +66,11 @@ pub struct Prefs {
     /// editor colours chosen by the user per theme: category key (theme::SqlCat::key) -> RGBA; only what was changed
     pub sql_colors_dark: std::collections::BTreeMap<String, [u8; 4]>,
     pub sql_colors_light: std::collections::BTreeMap<String, [u8; 4]>,
+    /// navigator panel hidden (a thin rail stays) and its width when shown
+    pub nav_collapsed: bool,
+    pub nav_width: f32,
+    /// multiplier of the mouse wheel line step (egui's 40 px)
+    pub scroll_speed: f32,
 }
 
 impl Prefs {
@@ -101,6 +106,9 @@ impl Default for Prefs {
             hl_metadata: true,
             sql_colors_dark: Default::default(),
             sql_colors_light: Default::default(),
+            nav_collapsed: false,
+            nav_width: 280.0,
+            scroll_speed: crate::constants::SCROLL_SPEED,
         }
     }
 }
@@ -708,6 +716,18 @@ mod tests {
         assert!(!r.ac_auto_popup && !r.hl_metadata && r.ac_insert_single);
         assert_eq!(r.sql_palette(true).get(crate::theme::SqlCat::Table), egui::Color32::from_rgb(0, 255, 0));
         assert_eq!(r.sql_palette(false), crate::theme::default_sql_palette(false), "the light theme is untouched");
+    }
+
+    #[test]
+    fn panel_and_scroll_prefs_default_for_old_files_and_round_trip() {
+        let p: Prefs = serde_json::from_str(r#"{"dark": true}"#).unwrap();
+        assert_eq!((p.nav_collapsed, p.nav_width, p.scroll_speed), (false, 280.0, 2.0));
+        let mut q = p.clone();
+        q.nav_collapsed = true;
+        q.nav_width = 333.0;
+        q.scroll_speed = 3.0;
+        let r: Prefs = serde_json::from_str(&serde_json::to_string(&q).unwrap()).unwrap();
+        assert_eq!((r.nav_collapsed, r.nav_width, r.scroll_speed), (true, 333.0, 3.0));
     }
     use crate::db::Kind;
 

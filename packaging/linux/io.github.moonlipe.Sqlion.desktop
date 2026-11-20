@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Sqlion
+GenericName=Database Client
+GenericName[pt_BR]=Cliente de bancos de dados
+Comment=SQL editor and database browser for SQLite, PostgreSQL, MySQL, SQL Server and MongoDB
+Comment[pt_BR]=Editor SQL e navegador de bancos para SQLite, PostgreSQL, MySQL, SQL Server e MongoDB
+Exec=sqlion
+Icon=io.github.moonlipe.Sqlion
+Terminal=false
+Categories=Development;Database;
+Keywords=sql;database;sqlite;postgresql;mysql;mariadb;sqlserver;mongodb;banco;
+StartupNotify=true
+StartupWMClass=io.github.moonlipe.Sqlion

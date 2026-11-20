@@ -1840,7 +1840,7 @@ mod mysql_tests {
             format!("CREATE PROCEDURE {}() BEGIN SELECT COUNT(*) FROM {}; END", q("dbr_conta"), q("dbr_a")),
             format!("CREATE TRIGGER {} BEFORE INSERT ON {} FOR EACH ROW SET NEW.obs = 'novo'", q("dbr_trg"), q("dbr_a")),
         ] {
-            let _ = s.run(&format!("DROP {} IF EXISTS {}", st.split_whitespace().nth(1).unwrap(), st.split('`').nth(3).map(&q).unwrap_or_default()), 0, 0);
+            let _ = s.run(&format!("DROP {} IF EXISTS {}", st.split_whitespace().nth(1).unwrap(), st.split('`').nth(3).map(q).unwrap_or_default()), 0, 0);
             s.run(&st, 0, 0).unwrap_or_else(|e| panic!("{}: {}", st, e));
         }
         assert!(s.objects("function", &db).unwrap().iter().any(|o| o.name == "dbr_soma"));

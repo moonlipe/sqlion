@@ -159,6 +159,7 @@ impl App {
                 dialog = Some(Dialog::Conn { cfg: Box::new(c), is_new: true, msg: None, pass: String::new() });
             }
         }
+        let nav_width = sh.store.prefs.nav_width.clamp(200.0, 560.0);
         let mut active = restored_active.unwrap_or(if demo && std::env::var("DBR_SLOW").is_err() { 1 } else { 0 });
         if demo && std::env::var("DBR_TAB").map(|v| v == "welcome").unwrap_or(false) {
             tabs.push(Tab { id: 9999, kind: TabKind::Welcome });
@@ -177,7 +178,7 @@ impl App {
             toast: None,
             applied_theme: Some((dark, size)),
             scripts_dir,
-            nav_w: 280.0,
+            nav_w: nav_width,
             demo,
             git_cache: None,
             last_scripts_dir: std::path::PathBuf::new(),
@@ -770,6 +771,11 @@ impl App {
                 }
             });
             ui.menu_button("Janela", |ui| {
+                let mut shown = !self.sh.store.prefs.nav_collapsed;
+                if ui.add(egui::Checkbox::new(&mut shown, "Mostrar navegador")).on_hover_text("Ctrl+B").changed() {
+                    self.toggle_nav();
+                    ui.close();
+                }
                 if ui.button("Preferências…").clicked() {
                     self.dialog = Some(Dialog::Prefs);
                     ui.close();
@@ -1206,6 +1212,9 @@ impl App {
         ui.horizontal(|ui| {
             icons::section(ui, "Navegador de bancos");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if icons::button(ui, Icon::Panel, "").on_hover_text("Recolher o navegador (Ctrl+B)").clicked() {
+                    self.toggle_nav();
+                }
                 if icons::button(ui, Icon::Refresh, "").on_hover_text("Atualizar (F5)").clicked() {
                     self.refresh_nav();
                 }
@@ -1215,7 +1224,8 @@ impl App {
             });
         });
         ui.add(egui::TextEdit::singleline(&mut self.nav_filter).hint_text("Filtrar tabelas…").desired_width(f32::INFINITY));
-        ui.add_space(4.0);
+        let gap = ui.allocate_response(egui::vec2(ui.available_width(), 4.0), egui::Sense::click());
+        gap.context_menu(|ui| self.nav_blank_menu(ui));
         let projects = self.sh.store.projects.clone();
         let nothing = self.sh.store.connections.is_empty() && projects.is_empty();
         egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
@@ -1240,6 +1250,10 @@ impl App {
             if self.sh.persist {
                 self.scripts_node(ui, None);
             }
+            // the rest of the panel: right click opens the menu of the empty area (the rows above keep their own)
+            let rest = ui.available_size().max(egui::vec2(ui.available_width(), 40.0));
+            let blank = ui.allocate_response(rest, egui::Sense::click());
+            blank.context_menu(|ui| self.nav_blank_menu(ui));
         });
     }
 
@@ -1444,6 +1458,81 @@ impl App {
         let c = self.current_conn();
         let dir = self.sh.store.new_script_dir(c.as_deref(), &self.scripts_dir);
         self.open_sql_in(c, String::new(), None, Some(dir));
+        if let Some(Tab { kind: TabKind::Sql(s), .. }) = self.tabs.last_mut() {
+            s.focus_editor = true;
+        }
+    }
+
+    /// Collapses the navigator to a thin rail, or shows it again with its previous width.
+    pub fn toggle_nav(&mut self) {
+        self.sh.store.prefs.nav_collapsed = !self.sh.store.prefs.nav_collapsed;
+        self.sh.save();
+    }
+
+    /// Menu of the empty part of the navigator: what can be created there.
+    fn nav_blank_menu(&mut self, ui: &mut Ui) {
+        if ui.button("Nova conexão…").clicked() {
+            self.sh.req(Req::NewConn);
+            ui.close();
+        }
+        if ui.button("Novo projeto…").clicked() {
+            self.open_new_project_dialog();
+            ui.close();
+        }
+        if ui.button("Abrir projeto…").clicked() {
+            self.dialog = Some(Dialog::OpenProject { dir: String::new(), msg: None });
+            ui.close();
+        }
+        ui.separator();
+        if ui.add(egui::Button::new("Novo script").shortcut_text("Ctrl+T")).clicked() {
+            self.new_script_in(Some(String::new()));
+            ui.close();
+        }
+        if ui.button("Nova pasta de conexões…").on_hover_text("No projeto padrão").clicked() {
+            self.dialog = Some(Dialog::Folder { project: String::new(), old: None, name: String::new(), msg: None });
+            ui.close();
+        }
+        ui.separator();
+        if ui.add(egui::Button::new("Atualizar").shortcut_text("F5")).clicked() {
+            self.refresh_nav();
+            ui.close();
+        }
+    }
+
+    /// F3: the scripts of the active tab's folder (its project or the loose scripts), else of the current connection's project.
+    pub fn open_script_picker(&mut self) {
+        let from_tab = match self.tabs.get(self.active) {
+            Some(Tab { kind: TabKind::Sql(s), .. }) => s.file.as_ref().and_then(|f| f.parent().map(|p| p.to_path_buf())),
+            _ => None,
+        };
+        let dir = from_tab.unwrap_or_else(|| {
+            let c = self.current_conn();
+            self.sh.store.new_script_dir(c.as_deref(), &self.scripts_dir)
+        });
+        let items = crate::dialogs::list_scripts(&dir);
+        self.dialog = Some(Dialog::PickScript { dir, items, filter: String::new(), sel: 0 });
+    }
+
+    /// F4: the object under the cursor of the focused SQL editor, or else the table/view selected in the navigator.
+    fn open_object_shortcut(&mut self, ctx: &egui::Context) {
+        let sql_tab = match self.tabs.get(self.active) {
+            Some(Tab { id, kind: TabKind::Sql(_) }) => Some(*id),
+            _ => None,
+        };
+        let editor_focused = sql_tab.map(|id| ctx.memory(|m| m.has_focus(crate::tabs::editor_id(id)))).unwrap_or(false);
+        match (&self.nav_sel, editor_focused) {
+            (Some(NavSel::Table(c, s, n, view)), false) => {
+                let r = crate::shared::ObjRef {
+                    conn: c.clone(),
+                    schema: s.clone(),
+                    name: n.clone(),
+                    kind: if *view { crate::shared::ObjKind::View } else { crate::shared::ObjKind::Table },
+                };
+                self.sh.req(r.open_req());
+            }
+            _ if sql_tab.is_some() => self.sql_cmd(SqlCmd::OpenObject),
+            _ => self.sh.status = "F4: posicione o cursor sobre um objeto no editor ou selecione uma tabela no navegador".into(),
+        }
     }
 
     /// Scripts of a project (`Some`) or the loose scripts (`None`).
@@ -1743,7 +1832,6 @@ impl App {
         let open = st.is_open();
         let f = self.nav_filter.to_lowercase();
         let count = self.sh.objects.get(&(id.to_string(), schema.to_string(), fd.key.to_string())).map(|v| v.len());
-        let kind = self.sh.kind(id);
         st.show_header(ui, |ui| {
             icons::tree_row(ui, icons::Lead::Icon(Icon::Folder, pl.warn), None, RichText::new(fd.label), &count.map(|n| n.to_string()).unwrap_or_default(), false, None);
         })
@@ -1764,19 +1852,8 @@ impl App {
                     self.sh.req(Req::OpenSource { conn: id.into(), schema: schema.into(), key: fd.key.into(), name: o.name.clone(), detail: o.detail.clone() });
                 }
                 r.context_menu(|ui| {
-                    if ui.button("Ver código-fonte").clicked() {
-                        self.sh.req(Req::OpenSource { conn: id.into(), schema: schema.into(), key: fd.key.into(), name: o.name.clone(), detail: o.detail.clone() });
-                        ui.close();
-                    }
-                    if matches!(fd.key, "function" | "procedure") && ui.button("Gerar chamada (CALL/EXEC)").clicked() {
-                        let text = call_template(kind, fd.key, schema, &o.name);
-                        self.sh.req(Req::OpenSql { conn: Some(id.into()), text, title: None });
-                        ui.close();
-                    }
-                    if ui.button("Copiar nome").clicked() {
-                        ui.ctx().copy_text(o.name.clone());
-                        ui.close();
-                    }
+                    let r = ObjRef { conn: id.into(), schema: schema.into(), name: o.name.clone(), kind: ObjKind::Code { key: fd.key.into(), detail: o.detail.clone() } };
+                    crate::objmenu::object_menu(ui, &mut self.sh, &r);
                 });
             }
         });
@@ -1796,7 +1873,10 @@ impl App {
             if r.double_clicked() {
                 self.sh.req(Req::OpenTable { conn: id.into(), schema: schema.into(), table: name.into(), view });
             }
-            r.context_menu(|ui| self.table_menu(ui, id, schema, name, view));
+            r.context_menu(|ui| {
+                let o = ObjRef { conn: id.into(), schema: schema.into(), name: name.into(), kind: if view { ObjKind::View } else { ObjKind::Table } };
+                crate::objmenu::object_menu(ui, &mut self.sh, &o);
+            });
         });
         hdr.body(|ui| {
             if !open {
@@ -1831,77 +1911,6 @@ impl App {
         });
     }
 
-    fn table_menu(&mut self, ui: &mut Ui, id: &str, schema: &str, name: &str, view: bool) {
-        if ui.button("Abrir tabela (dados)").clicked() {
-            self.sh.req(Req::OpenTable { conn: id.into(), schema: schema.into(), table: name.into(), view });
-            ui.close();
-        }
-        if ui.button("Novo script SQL (SELECT)").clicked() {
-            let q = self.sh.qualified(id, schema, name);
-            self.open_sql(Some(id.into()), format!("SELECT * FROM {};\n", q), None);
-            ui.close();
-        }
-        if ui.button("Diagrama ER").clicked() {
-            self.sh.req(Req::OpenEr { conn: id.into(), schema: schema.into(), focus: Some(name.into()) });
-            ui.close();
-        }
-        ui.menu_button("Gerar SQL", |ui| {
-            for (label, kind) in [("SELECT", 0u8), ("INSERT", 1), ("UPDATE", 2), ("DELETE", 3), ("DDL", 4)] {
-                if ui.button(label).clicked() {
-                    let text = self.generate_sql(id, schema, name, kind);
-                    self.sh.req(Req::GenSql { title: format!("Gerar SQL — {}", label), text });
-                    ui.close();
-                }
-            }
-        });
-        ui.separator();
-        if ui.button("Exportar dados…").clicked() {
-            let q = self.sh.qualified(id, schema, name);
-            self.sh.req(Req::Export { conn: id.into(), sql: format!("SELECT * FROM {}", q), name: name.into(), rows: None });
-            ui.close();
-        }
-        if !view && ui.button("Importar dados CSV…").clicked() {
-            self.sh.req(Req::Import { conn: id.into(), schema: schema.into(), table: name.into() });
-            ui.close();
-        }
-        ui.separator();
-        if ui.button("Copiar nome").clicked() {
-            ui.ctx().copy_text(name.to_string());
-            ui.close();
-        }
-        if ui.button("Atualizar").clicked() {
-            self.sh.refresh(id);
-            ui.close();
-        }
-        if !view && ui.button("Excluir tabela (abre DROP no editor)").clicked() {
-            let q = self.sh.qualified(id, schema, name);
-            self.open_sql(Some(id.into()), format!("DROP TABLE {};\n", q), None);
-            ui.close();
-        }
-    }
-
-    fn generate_sql(&mut self, id: &str, schema: &str, name: &str, kind: u8) -> String {
-        let m = self.sh.ensure_tmeta(id, schema, name);
-        let k = self.sh.kind(id);
-        let q = self.sh.qualified(id, schema, name);
-        let cols: Vec<String> = m.columns.iter().map(|c| k.quote(&c.name)).collect();
-        let pk: Vec<String> = m.columns.iter().filter(|c| c.pk).map(|c| format!("{} = ?", k.quote(&c.name))).collect();
-        let wh = if pk.is_empty() { "<condição>".to_string() } else { pk.join(" AND ") };
-        match kind {
-            0 => format!("SELECT {}\nFROM {};", cols.join(",\n       "), q),
-            1 => format!("INSERT INTO {} ({})\nVALUES ({});", q, cols.join(", "), vec!["?"; cols.len()].join(", ")),
-            2 => format!("UPDATE {}\nSET {}\nWHERE {};", q, cols.iter().map(|c| format!("{} = ?", c)).collect::<Vec<_>>().join(",\n    "), wh),
-            3 => format!("DELETE FROM {}\nWHERE {};", q, wh),
-            _ => {
-                if m.ddl.is_empty() {
-                    build_ddl(k, schema, name, &m)
-                } else {
-                    m.ddl
-                }
-            }
-        }
-    }
-
     fn frame_logic(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         self.frames += 1;
         let focused = ctx.input(|i| i.focused);
@@ -1912,6 +1921,10 @@ impl App {
         self.autosave_session(false);
         self.sh.poll_meta();
         let want = (self.sh.store.prefs.dark, self.sh.store.prefs.font_size);
+        let step = wheel_step(self.sh.store.prefs.scroll_speed);
+        if ctx.options(|o| o.input_options.line_scroll_speed) != step {
+            ctx.options_mut(|o| o.input_options.line_scroll_speed = step);
+        }
         if self.applied_theme != Some(want) {
             setup_style(ctx, want.0, want.1);
             self.applied_theme = Some(want);
@@ -1934,8 +1947,17 @@ impl App {
                 self.sql_cmd(c);
             }
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::CloseBracket)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::CloseBracket) || i.consume_key(Modifiers::COMMAND, Key::T)) {
             self.new_script_here();
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F4)) {
+            self.open_object_shortcut(ctx);
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F3)) {
+            self.open_script_picker();
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::B)) {
+            self.toggle_nav();
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::W)) && !self.tabs.is_empty() {
             let a = self.active;
@@ -1967,13 +1989,30 @@ impl App {
         egui::Panel::top("menu").frame(fr(pl.panel)).show(ui, |ui| self.menu_bar(ui));
         egui::Panel::top("toolbar").frame(fr(pl.toolbar).stroke(egui::Stroke::new(1.0, pl.border))).show(ui, |ui| self.toolbar(ui));
         egui::Panel::bottom("status").frame(fr(pl.toolbar).stroke(egui::Stroke::new(1.0, pl.border))).show(ui, |ui| self.status_bar(ui));
-        let r = egui::Panel::left("navigator")
-            .frame(egui::Frame::new().fill(pl.panel).inner_margin(egui::Margin::same(10)).stroke(egui::Stroke::new(1.0, pl.border)))
-            .resizable(true)
-            .default_size(self.nav_w)
-            .size_range(200.0..=560.0)
-            .show(ui, |ui| self.navigator(ui));
-        self.nav_w = r.response.rect.width();
+        if self.sh.store.prefs.nav_collapsed {
+            egui::Panel::left("navigator_rail")
+                .frame(egui::Frame::new().fill(pl.panel).inner_margin(egui::Margin::symmetric(3, 8)).stroke(egui::Stroke::new(1.0, pl.border)))
+                .resizable(false)
+                .exact_size(30.0)
+                .show(ui, |ui| {
+                    if icons::button(ui, Icon::Panel, "").on_hover_text("Mostrar o navegador (Ctrl+B)").clicked() {
+                        self.toggle_nav();
+                    }
+                });
+        } else {
+            let r = egui::Panel::left("navigator")
+                .frame(egui::Frame::new().fill(pl.panel).inner_margin(egui::Margin::same(10)).stroke(egui::Stroke::new(1.0, pl.border)))
+                .resizable(true)
+                .default_size(self.nav_w)
+                .size_range(200.0..=560.0)
+                .show(ui, |ui| self.navigator(ui));
+            self.nav_w = r.response.rect.width();
+            // the width is kept once the user lets go of the panel edge
+            if (self.nav_w - self.sh.store.prefs.nav_width).abs() > 1.0 && !ctx.input(|i| i.pointer.any_down()) {
+                self.sh.store.prefs.nav_width = self.nav_w;
+                self.sh.save();
+            }
+        }
 
         egui::CentralPanel::default().frame(egui::Frame::new().fill(pl.bg)).show(ui, |ui| {
             if self.tabs.is_empty() {
@@ -2114,6 +2153,13 @@ impl Drop for App {
 }
 
 /// `session.json` lives next to `workspace.json` (the configuration folder).
+/// Pixels of one mouse wheel line step: egui's native 40 px times the preference (clamped to its range).
+pub fn wheel_step(speed: f32) -> f32 {
+    let r = crate::constants::SCROLL_SPEED_RANGE;
+    let s = if speed.is_finite() { speed.clamp(*r.start(), *r.end()) } else { crate::constants::SCROLL_SPEED };
+    40.0 * s
+}
+
 fn session_path(store: &Store) -> std::path::PathBuf {
     store.path.as_ref().and_then(|p| p.parent()).map(|d| d.join("session.json")).unwrap_or_else(crate::session::path)
 }
@@ -2139,17 +2185,6 @@ fn object_icon(key: &str) -> Icon {
         "index" => Icon::Index,
         "matview" => Icon::View,
         _ => Icon::Table,
-    }
-}
-
-fn call_template(kind: Kind, key: &str, schema: &str, name: &str) -> String {
-    match (kind, key) {
-        (Kind::SqlServer, "procedure") => format!("EXEC [{}].[{}];\n", schema, name),
-        (Kind::SqlServer, _) => format!("SELECT [{}].[{}]();\n", schema, name),
-        (Kind::Mysql, "procedure") => format!("CALL {}.{}();\n", kind.quote(schema), kind.quote(name)),
-        (Kind::Mysql, _) => format!("SELECT {}.{}();\n", kind.quote(schema), kind.quote(name)),
-        (_, "procedure") => format!("CALL {}.{}();\n", kind.quote(schema), kind.quote(name)),
-        _ => format!("SELECT {}.{}();\n", kind.quote(schema), kind.quote(name)),
     }
 }
 
@@ -2273,7 +2308,8 @@ mod dnd_tests {
 
 #[cfg(test)]
 mod project_close_tests {
-    use super::App;
+    use super::{App, NavSel};
+    use crate::dialogs::Dialog;
     use crate::db::{ConnConfig, Kind, TxMode};
     use crate::shared::{spawn_job, JobMsg, JobStmt, Shared};
     use crate::store::Store;
@@ -2300,6 +2336,175 @@ mod project_close_tests {
             was_focused: true,
             session_saved: None,
         }
+    }
+
+    /// Runs one full frame of the app with the given input events.
+    fn run(a: &mut App, ctx: &egui::Context, events: Vec<egui::Event>, t: &mut f64) {
+        *t += 0.05;
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0))), time: Some(*t), events, ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| a.frame_logic(ctx, ui));
+        out.textures_delta.clear();
+    }
+
+    fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }
+    }
+
+    const CTRL: egui::Modifiers = egui::Modifiers { alt: false, ctrl: true, shift: false, mac_cmd: false, command: true };
+
+    fn sqlite_conn(a: &mut App) -> String {
+        let p = std::env::temp_dir().join(format!("dbr-app-{}.sqlite", crate::store::new_project_id()));
+        crate::sample::create(&p).unwrap();
+        let mut c = ConnConfig::new(Kind::Sqlite);
+        c.database = p.to_string_lossy().to_string();
+        let id = c.id.clone();
+        a.sh.store.connections.push(c);
+        a.sh.connect(&id).unwrap();
+        id
+    }
+
+    #[test]
+    fn ctrl_t_opens_an_empty_script_on_the_current_connection() {
+        let mut a = app();
+        let id = sqlite_conn(&mut a);
+        let (ctx, mut t) = (egui::Context::default(), 0.0);
+        run(&mut a, &ctx, vec![], &mut t);
+        run(&mut a, &ctx, vec![key(egui::Key::T, CTRL)], &mut t);
+        assert_eq!(a.tabs.len(), 1);
+        let TabKind::Sql(s) = &a.tabs[0].kind else { panic!("an SQL tab") };
+        assert_eq!((s.text.as_str(), s.conn.as_deref()), ("", Some(id.as_str())));
+        let tab = a.tabs[0].id;
+        run(&mut a, &ctx, vec![], &mut t);
+        assert!(ctx.memory(|m| m.has_focus(crate::tabs::editor_id(tab))), "the editor of the new tab gets the focus");
+        run(&mut a, &ctx, vec![key(egui::Key::T, CTRL)], &mut t);
+        assert_eq!((a.tabs.len(), a.active), (2, 1), "the new tab is the active one");
+    }
+
+    #[test]
+    fn closing_an_untouched_new_script_leaves_no_file() {
+        let b = base("ctrlt");
+        let mut a = app();
+        a.sh.persist = true;
+        a.scripts_dir = b.clone();
+        a.new_script_here();
+        let TabKind::Sql(s) = &mut a.tabs[0].kind else { panic!() };
+        let f = s.file.clone().expect("a script file is reserved");
+        std::fs::write(&f, "").unwrap();
+        a.close_tab(0);
+        assert!(!f.exists(), "an empty new script leaves nothing behind");
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn f4_in_the_navigator_opens_the_selected_table() {
+        let mut a = app();
+        let id = sqlite_conn(&mut a);
+        let (ctx, mut t) = (egui::Context::default(), 0.0);
+        run(&mut a, &ctx, vec![], &mut t);
+        a.nav_sel = Some(NavSel::Table(id.clone(), "main".into(), "orders".into(), false));
+        run(&mut a, &ctx, vec![key(egui::Key::F4, egui::Modifiers::NONE)], &mut t);
+        run(&mut a, &ctx, vec![], &mut t);
+        assert!(a.tabs.iter().any(|t| matches!(&t.kind, TabKind::Table(x) if x.table == "orders")), "the table tab opens");
+        let n = a.tabs.len();
+        run(&mut a, &ctx, vec![key(egui::Key::F4, egui::Modifiers::NONE)], &mut t);
+        run(&mut a, &ctx, vec![], &mut t);
+        assert_eq!(a.tabs.len(), n, "pressing it again activates the same tab");
+        a.nav_sel = Some(NavSel::Table(id.clone(), "main".into(), "customer_totals".into(), true));
+        run(&mut a, &ctx, vec![key(egui::Key::F4, egui::Modifiers::NONE)], &mut t);
+        run(&mut a, &ctx, vec![], &mut t);
+        assert!(a.tabs.iter().any(|t| matches!(&t.kind, TabKind::Sql(s) if s.text.contains("CREATE VIEW customer_totals"))), "a view opens its definition");
+    }
+
+    #[test]
+    fn f3_lists_the_scripts_of_the_tab_folder_and_opens_without_duplicating() {
+        let b = base("f3");
+        let (old, new) = (b.join("fechamento_mes.sql"), b.join("relatorio.sql"));
+        std::fs::write(&old, "select 1").unwrap();
+        std::fs::write(&new, "select 2").unwrap();
+        std::fs::write(b.join("notas.txt"), "x").unwrap();
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(&old).unwrap().set_modified(past).unwrap();
+        let mut a = app();
+        a.open_script_file(&new);
+        let (ctx, mut t) = (egui::Context::default(), 0.0);
+        run(&mut a, &ctx, vec![key(egui::Key::F3, egui::Modifiers::NONE)], &mut t);
+        match &a.dialog {
+            Some(Dialog::PickScript { dir, items, .. }) => {
+                assert_eq!(dir, &b);
+                assert_eq!(items, &vec![new.clone(), old.clone()], "only .sql files, most recent first");
+                assert_eq!(crate::dialogs::filter_scripts(items, "FECHA"), vec![&old]);
+            }
+            _ => panic!("the picker opens"),
+        }
+        // typing the filter and Enter opens the first match
+        run(&mut a, &ctx, vec![egui::Event::Text("fecha".into())], &mut t);
+        run(&mut a, &ctx, vec![key(egui::Key::Enter, egui::Modifiers::NONE)], &mut t);
+        assert!(a.dialog.is_none(), "Enter closes the picker");
+        assert!(a.tabs.iter().any(|t| matches!(&t.kind, TabKind::Sql(s) if s.file.as_deref() == Some(old.as_path()))));
+        let n = a.tabs.len();
+        a.open_script_file(&new);
+        assert_eq!(a.tabs.len(), n, "an open script is activated, not opened twice");
+        assert!(matches!(&a.tabs[a.active].kind, TabKind::Sql(s) if s.file.as_deref() == Some(new.as_path())));
+        // Esc closes without opening anything
+        run(&mut a, &ctx, vec![key(egui::Key::F3, egui::Modifiers::NONE)], &mut t);
+        run(&mut a, &ctx, vec![key(egui::Key::Escape, egui::Modifiers::NONE)], &mut t);
+        assert!(a.dialog.is_none());
+        assert_eq!(a.tabs.len(), n);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn ctrl_b_collapses_and_restores_the_navigator() {
+        let mut a = app();
+        a.sh.store.prefs.nav_width = 330.0;
+        a.nav_w = 330.0;
+        a.open_sql(None, "select 1".into(), None);
+        let TabKind::Sql(s) = &mut a.tabs[0].kind else { panic!() };
+        s.focus_editor = true;
+        let (ctx, mut t) = (egui::Context::default(), 0.0);
+        run(&mut a, &ctx, vec![], &mut t);
+        run(&mut a, &ctx, vec![], &mut t);
+        let w = a.nav_w;
+        assert!((w - 330.0).abs() < 1.0, "starts with the saved width: {}", w);
+        run(&mut a, &ctx, vec![key(egui::Key::B, CTRL)], &mut t);
+        run(&mut a, &ctx, vec![], &mut t);
+        assert!(a.sh.store.prefs.nav_collapsed);
+        let TabKind::Sql(s) = &a.tabs[0].kind else { panic!() };
+        assert_eq!(s.text, "select 1", "the editor text does not change");
+        run(&mut a, &ctx, vec![key(egui::Key::B, CTRL)], &mut t);
+        run(&mut a, &ctx, vec![], &mut t);
+        assert!(!a.sh.store.prefs.nav_collapsed);
+        assert!((a.nav_w - w).abs() < 1.0, "expanded with the previous width: {} vs {}", a.nav_w, w);
+    }
+
+    #[test]
+    fn right_click_on_the_empty_navigator_opens_its_menu() {
+        let mut a = app();
+        let (ctx, mut t) = (egui::Context::default(), 0.0);
+        run(&mut a, &ctx, vec![], &mut t);
+        run(&mut a, &ctx, vec![], &mut t);
+        assert!(!egui::Popup::is_any_open(&ctx));
+        let at = egui::Pos2::new(100.0, 600.0);
+        let btn = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE };
+        run(&mut a, &ctx, vec![egui::Event::PointerMoved(at)], &mut t);
+        run(&mut a, &ctx, vec![btn(true)], &mut t);
+        run(&mut a, &ctx, vec![btn(false)], &mut t);
+        run(&mut a, &ctx, vec![], &mut t);
+        assert!(egui::Popup::is_any_open(&ctx), "the menu of the empty area is open");
+    }
+
+    #[test]
+    fn the_wheel_step_follows_the_preference() {
+        assert_eq!(super::wheel_step(2.0), 80.0, "twice the 0.2.0 speed by default");
+        assert_eq!(super::wheel_step(99.0), 200.0);
+        assert_eq!(super::wheel_step(f32::NAN), 80.0);
+        let mut a = app();
+        let (ctx, mut t) = (egui::Context::default(), 0.0);
+        run(&mut a, &ctx, vec![], &mut t);
+        assert_eq!(ctx.options(|o| o.input_options.line_scroll_speed), 80.0);
+        a.sh.store.prefs.scroll_speed = 3.0;
+        run(&mut a, &ctx, vec![], &mut t);
+        assert_eq!(ctx.options(|o| o.input_options.line_scroll_speed), 120.0, "applied at once");
     }
 
     fn base(tag: &str) -> std::path::PathBuf {

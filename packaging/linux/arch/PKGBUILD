@@ -1,0 +1,48 @@
+# Sqlion for Arch Linux and derivatives (Manjaro, EndeavourOS, CachyOS...).
+# Each GitHub release attaches this file with pkgver and sha256sums of that release filled in:
+#   download PKGBUILD from the release, then run `makepkg -si` in its folder.
+# Ready to publish on the AUR as is.
+pkgname=sqlion
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="SQL editor and database browser for SQLite, PostgreSQL, MySQL, SQL Server and MongoDB"
+arch=('x86_64' 'aarch64')
+url="https://github.com/moonlipe/sqlion"
+license=('GPL-3.0-or-later')
+# GL, EGL, Wayland, X11 and xkbcommon are loaded at run time
+depends=('gcc-libs' 'glibc' 'zlib' 'libglvnd' 'wayland' 'libxkbcommon' 'libxkbcommon-x11' 'libx11' 'libxcb' 'libxcursor' 'libxi' 'libxrender' 'hicolor-icon-theme')
+# perl builds the static OpenSSL used for legacy SQL Server TLS
+makedepends=('cargo' 'perl')
+options=('!lto')
+source=("$pkgname-$pkgver-source.tar.gz::$url/releases/download/v$pkgver/sqlion-$pkgver-source.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  # keep the build folder out of the Rust code (panic messages carry source paths); makepkg still warns about
+  # $srcdir because the static OpenSSL (legacy SQL Server TLS) records its ENGINESDIR/MODULESDIR, which are unused
+  export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$srcdir=/build"
+  cargo build --frozen --release
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  local id=io.github.moonlipe.Sqlion
+  install -Dm755 target/release/sqlion "$pkgdir/usr/bin/sqlion"
+  install -Dm644 "packaging/linux/$id.desktop" "$pkgdir/usr/share/applications/$id.desktop"
+  install -Dm644 "packaging/linux/$id.metainfo.xml" "$pkgdir/usr/share/metainfo/$id.metainfo.xml"
+  for s in 64 128 256; do
+    install -Dm644 "packaging/linux/icons/$s.png" "$pkgdir/usr/share/icons/hicolor/${s}x${s}/apps/$id.png"
+  done
+  install -Dm644 packaging/linux/icons/sqlion.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/$id.svg"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

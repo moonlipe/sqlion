@@ -82,9 +82,110 @@ jobs:
           path: dist/sqlion-*.${{ matrix.archive }}
           if-no-files-found: error
 
+  linux-packages:
+    name: pacotes Linux ${{ matrix.arch }}
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { arch: x86_64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, deb: amd64 }
+          - { arch: aarch64, os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, deb: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: pkg-${{ matrix.target }}
+          path: dist-in
+
+      - name: Binário compilado no job build
+        id: bin
+        shell: bash
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/version *= *"([^"]+)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          tar -xzf "dist-in/sqlion-$VERSION-${{ matrix.target }}.tar.gz" -C dist-in
+          mkdir -p "target/${{ matrix.target }}/release"
+          cp "dist-in/sqlion-$VERSION-${{ matrix.target }}/sqlion" "target/${{ matrix.target }}/release/sqlion"
+          mkdir -p dist
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb,cargo-generate-rpm
+
+      - name: .deb
+        run: |
+          cargo deb --no-build --no-strip --target ${{ matrix.target }} -o "dist/sqlion_${{ steps.bin.outputs.version }}_${{ matrix.deb }}.deb"
+          dpkg-deb --info dist/*.deb
+          dpkg-deb --contents dist/*.deb
+
+      - name: .rpm
+        run: |
+          cargo generate-rpm --target ${{ matrix.target }} -o "dist/sqlion-${{ steps.bin.outputs.version }}-${{ matrix.arch }}.rpm"
+          sudo apt-get install -y rpm > /dev/null
+          rpm -qip dist/*.rpm
+          rpm -qlp dist/*.rpm
+
+      - name: AppImage
+        run: |
+          sudo apt-get install -y libfuse2 > /dev/null || true
+          packaging/linux/appimage.sh "target/${{ matrix.target }}/release/sqlion" "${{ steps.bin.outputs.version }}" dist
+
+      - name: Instalar o .deb (verificação)
+        run: |
+          sudo apt-get install -y "./dist/sqlion_${{ steps.bin.outputs.version }}_${{ matrix.deb }}.deb"
+          test -x /usr/bin/sqlion
+          test -f /usr/share/icons/hicolor/256x256/apps/io.github.moonlipe.Sqlion.png
+          sudo apt-get install -y desktop-file-utils > /dev/null
+          desktop-file-validate /usr/share/applications/io.github.moonlipe.Sqlion.desktop
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: |
+            dist/*.deb
+            dist/*.rpm
+            dist/*.AppImage
+          if-no-files-found: error
+
+  flatpak:
+    name: flatpak x86_64
+    needs: build
+    runs-on: ubuntu-22.04
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-24.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: pkg-x86_64-unknown-linux-gnu
+          path: dist-in
+
+      - name: Flatpak
+        shell: bash
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/version *= *"([^"]+)"/\1/')
+          tar -xzf "dist-in/sqlion-$VERSION-x86_64-unknown-linux-gnu.tar.gz" -C dist-in
+          mkdir -p target/x86_64-unknown-linux-gnu/release dist
+          cp "dist-in/sqlion-$VERSION-x86_64-unknown-linux-gnu/sqlion" target/x86_64-unknown-linux-gnu/release/sqlion
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak-builder --user --install-deps-from=flathub --disable-rofiles-fuse --force-clean --repo=repo build packaging/linux/flatpak/io.github.moonlipe.Sqlion.yml
+          flatpak build-bundle repo "dist/sqlion-$VERSION-x86_64.flatpak" io.github.moonlipe.Sqlion --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-flatpak
+          path: dist/*.flatpak
+          if-no-files-found: error
+
   release:
     name: publicar release
-    needs: build
+    needs: [build, linux-packages, flatpak]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-22.04
     permissions:
@@ -98,15 +199,29 @@ jobs:
           merge-multiple: true
           path: dist
 
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: linux-*
+          merge-multiple: true
+          path: dist
+
       - name: Código-fonte
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           git archive --format=tar.gz --prefix="sqlion-${VERSION}/" -o "dist/sqlion-${VERSION}-source.tar.gz" "$GITHUB_REF_NAME"
           git archive --format=zip --prefix="sqlion-${VERSION}/" -o "dist/sqlion-${VERSION}-source.zip" "$GITHUB_REF_NAME"
 
+      - name: PKGBUILD (Arch) com a versão e o checksum deste release
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          SUM=$(sha256sum "dist/sqlion-${VERSION}-source.tar.gz" | cut -d' ' -f1)
+          sed -e "s/^pkgver=.*/pkgver=${VERSION}/" -e "s/^sha256sums=.*/sha256sums=('${SUM}')/" packaging/linux/arch/PKGBUILD > dist/PKGBUILD
+          grep -E '^(pkgver|sha256sums)=' dist/PKGBUILD
+          echo "Código-fonte sqlion-${VERSION}-source.tar.gz: sha256 \`${SUM}\`" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Checksums
         working-directory: dist
-        run: sha256sum sqlion-* > SHA256SUMS
+        run: sha256sum sqlion-* sqlion_* PKGBUILD > SHA256SUMS
 
       - name: Criar o release
         env:

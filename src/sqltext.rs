@@ -871,9 +871,122 @@ pub fn auto_upper(text: &str, default_upper: bool) -> bool {
     }
 }
 
+/// Object name as written in SQL: optional schema and the name, without quotes.
+pub type ObjName = (Option<String>, String);
+
+/// Dotted name chains of the text: each part is (byte start, byte end, unquoted text, plain word that is a keyword
+/// or built-in function). `[a b]`, `"a b"` and `` `a b` `` are one part each.
+fn name_chains(s: &str) -> Vec<Vec<(usize, usize, String, bool)>> {
+    let toks: Vec<(Tok, usize, usize)> = tokenize(s).into_iter().filter(|(k, _, _)| *k != Tok::Space).collect();
+    let mut chains: Vec<Vec<(usize, usize, String, bool)>> = Vec::new();
+    let mut cur: Vec<(usize, usize, String, bool)> = Vec::new();
+    let mut want_part = true;
+    let mut i = 0;
+    let flush = |cur: &mut Vec<(usize, usize, String, bool)>, chains: &mut Vec<Vec<(usize, usize, String, bool)>>| {
+        if !cur.is_empty() {
+            chains.push(std::mem::take(cur));
+        }
+    };
+    while i < toks.len() {
+        let (k, a, b) = toks[i];
+        let t = &s[a..b];
+        let part = match k {
+            Tok::Ident => Some((a, b, t.to_string(), false, i + 1)),
+            Tok::Keyword | Tok::Function => Some((a, b, t.to_string(), true, i + 1)),
+            Tok::QuotedIdent => Some((a, b, t[1..].trim_end_matches(&t[..1]).to_string(), false, i + 1)),
+            Tok::Op if t == "[" => toks[i + 1..].iter().position(|(k, x, y)| *k == Tok::Op && &s[*x..*y] == "]").map(|p| {
+                let end = toks[i + 1 + p].2;
+                (a, end, s[a + 1..end - 1].to_string(), false, i + 2 + p)
+            }),
+            _ => None,
+        };
+        match part {
+            Some((a, b, text, plain, next)) if want_part => {
+                cur.push((a, b, text, plain));
+                want_part = false;
+                i = next;
+            }
+            _ if k == Tok::Op && t == "." && !want_part => {
+                want_part = true;
+                i += 1;
+            }
+            Some((a, b, text, plain, next)) => {
+                flush(&mut cur, &mut chains);
+                cur.push((a, b, text, plain));
+                want_part = false;
+                i = next;
+            }
+            None => {
+                flush(&mut cur, &mut chains);
+                want_part = true;
+                i += 1;
+            }
+        }
+    }
+    flush(&mut cur, &mut chains);
+    chains
+}
+
+fn chain_name(c: &[(usize, usize, String, bool)]) -> Option<ObjName> {
+    // a lone keyword or function name is not an object; inside `schema.name` it may be one
+    if c.len() == 1 && c[0].3 {
+        return None;
+    }
+    let name = c.last()?.2.clone();
+    let schema = (c.len() >= 2).then(|| c[c.len() - 2].2.clone());
+    (!name.is_empty()).then_some((schema, name))
+}
+
+/// Object name under the cursor (`char_pos`, in characters): `schema.name`, `[x]`, `"x"`, `` `x` ``.
+/// `None` inside strings, comments, numbers and on lone keywords.
+pub fn ident_at(text: &str, char_pos: usize) -> Option<ObjName> {
+    let pos = text.char_indices().nth(char_pos).map(|(b, _)| b).unwrap_or(text.len());
+    name_chains(text).into_iter().find(|c| c.first().map(|p| p.0).unwrap_or(0) <= pos && pos <= c.last().map(|p| p.1).unwrap_or(0)).and_then(|c| chain_name(&c))
+}
+
+/// Object name written by the whole selected text (trimmed); `None` when it is anything else.
+pub fn ident_in(selected: &str) -> Option<ObjName> {
+    let t = selected.trim();
+    let chains = name_chains(t);
+    match chains.as_slice() {
+        [c] if c.first().map(|p| p.0) == Some(0) && c.last().map(|p| p.1) == Some(t.len()) => chain_name(c),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identifier_under_the_cursor() {
+        let s = "SELECT * FROM vendas.clientes c WHERE x = 'pedidos' -- itens\n";
+        let at = |w: &str, off: usize| ident_at(s, s.find(w).unwrap() + off);
+        assert_eq!(at("clientes", 0), Some((Some("vendas".into()), "clientes".into())));
+        assert_eq!(at("clientes", 8), Some((Some("vendas".into()), "clientes".into())));
+        assert_eq!(at("vendas", 2), Some((Some("vendas".into()), "clientes".into())));
+        assert_eq!(at("SELECT", 2), None);
+        assert_eq!(at("pedidos", 2), None);
+        assert_eq!(at("itens", 1), None);
+        assert_eq!(ident_at("EXEC atualiza_saldo 10", 7), Some((None, "atualiza_saldo".into())));
+        assert_eq!(ident_at("SELECT * FROM [dbo].[Minha Tabela]", 22), Some((Some("dbo".into()), "Minha Tabela".into())));
+        assert_eq!(ident_at("SELECT * FROM \"Pedidos\"", 16), Some((None, "Pedidos".into())));
+        assert_eq!(ident_at("SELECT * FROM `db`.`t`", 20), Some((Some("db".into()), "t".into())));
+        assert_eq!(ident_at("SELECT * FROM base.dbo.t", 22), Some((Some("dbo".into()), "t".into())));
+        assert_eq!(ident_at("SELECT * FROM dbo.user", 20), Some((Some("dbo".into()), "user".into())));
+        assert_eq!(ident_at("SELECT 1", 7), None);
+        assert_eq!(ident_at("", 0), None);
+        assert_eq!(ident_at("é tabela", 3), Some((None, "tabela".into())));
+    }
+
+    #[test]
+    fn identifier_of_the_selection() {
+        assert_eq!(ident_in(" relatorio.vw_vendas "), Some((Some("relatorio".into()), "vw_vendas".into())));
+        assert_eq!(ident_in("clientes"), Some((None, "clientes".into())));
+        assert_eq!(ident_in("clientes c"), None);
+        assert_eq!(ident_in("SELECT"), None);
+        assert_eq!(ident_in("'x'"), None);
+    }
 
     fn kinds(s: &str) -> Vec<(Tok, String)> {
         tokenize(s).into_iter().filter(|(k, _, _)| *k != Tok::Space).map(|(k, a, b)| (k, s[a..b].to_string())).collect()

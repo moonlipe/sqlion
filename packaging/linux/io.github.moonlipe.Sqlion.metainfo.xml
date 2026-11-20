@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.moonlipe.Sqlion</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Sqlion</name>
+  <summary>SQL editor and database browser</summary>
+  <summary xml:lang="pt-BR">Editor SQL e navegador de bancos de dados</summary>
+  <developer id="io.github.moonlipe">
+    <name>Sqlion contributors</name>
+  </developer>
+  <description>
+    <p>Sqlion is a fast native database client for SQLite, PostgreSQL, MySQL/MariaDB, SQL Server and MongoDB.</p>
+    <ul>
+      <li>Database navigator with tables, views, procedures, functions and triggers</li>
+      <li>SQL editor with highlighting, autocompletion, formatting and IDE shortcuts</li>
+      <li>Editable result grid, export and import, ER diagrams</li>
+      <li>Auto, Manual and Smart transaction modes</li>
+      <li>Projects stored in folders, ready to be versioned with git</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.moonlipe.Sqlion.desktop</launchable>
+  <url type="homepage">https://github.com/moonlipe/sqlion</url>
+  <url type="bugtracker">https://github.com/moonlipe/sqlion/issues</url>
+  <url type="vcs-browser">https://github.com/moonlipe/sqlion</url>
+  <categories>
+    <category>Development</category>
+    <category>Database</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <provides>
+    <binary>sqlion</binary>
+  </provides>
+  <releases>
+    <release version="0.2.0" date="2026-11-20"/>
+  </releases>
+</component>

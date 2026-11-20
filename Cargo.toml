@@ -3,6 +3,10 @@ name = "sqlion"
 version = "0.2.0"
 license = "GPL-3.0-or-later"
 edition = "2021"
+description = "SQL editor and database browser (SQLite, PostgreSQL, MySQL, SQL Server, MongoDB)"
+homepage = "https://github.com/moonlipe/sqlion"
+repository = "https://github.com/moonlipe/sqlion"
+readme = "README.md"
 
 [dependencies]
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
@@ -20,6 +24,58 @@ tokio = { version = "1", features = ["rt", "net", "time", "macros"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 mongodb = { version = "3", default-features = false, features = ["sync", "rustls-tls", "compat-3-0-0", "dns-resolver"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Linux packages (built by the release workflow from the already compiled binary):
+# `cargo deb --no-build --target <triple>` and `cargo generate-rpm --target <triple>`.
+# GL, EGL, Wayland, X11 and xkbcommon are loaded at run time (dlopen), so they are listed by hand.
+[package.metadata.deb]
+maintainer = "Sqlion contributors <https://github.com/moonlipe/sqlion/issues>"
+copyright = "Sqlion contributors"
+license-file = ["LICENSE", "0"]
+extended-description = "Native database client for SQLite, PostgreSQL, MySQL/MariaDB, SQL Server and MongoDB: database navigator, SQL editor, editable result grid, export and import, ER diagrams, transaction modes and git-friendly projects."
+section = "database"
+priority = "optional"
+depends = "$auto, libegl1, libgl1, libwayland-client0, libwayland-egl1, libx11-6, libx11-xcb1, libxcb1, libxcursor1, libxi6, libxkbcommon0, libxkbcommon-x11-0, libxrender1"
+assets = [
+    ["target/release/sqlion", "usr/bin/", "755"],
+    ["packaging/linux/io.github.moonlipe.Sqlion.desktop", "usr/share/applications/", "644"],
+    ["packaging/linux/io.github.moonlipe.Sqlion.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["packaging/linux/icons/64.png", "usr/share/icons/hicolor/64x64/apps/io.github.moonlipe.Sqlion.png", "644"],
+    ["packaging/linux/icons/128.png", "usr/share/icons/hicolor/128x128/apps/io.github.moonlipe.Sqlion.png", "644"],
+    ["packaging/linux/icons/256.png", "usr/share/icons/hicolor/256x256/apps/io.github.moonlipe.Sqlion.png", "644"],
+    ["packaging/linux/icons/sqlion.svg", "usr/share/icons/hicolor/scalable/apps/io.github.moonlipe.Sqlion.svg", "644"],
+    ["README.md", "usr/share/doc/sqlion/", "644"],
+]
+
+[package.metadata.generate-rpm]
+license = "GPL-3.0-or-later"
+summary = "SQL editor and database browser"
+assets = [
+    { source = "target/release/sqlion", dest = "/usr/bin/sqlion", mode = "755" },
+    { source = "packaging/linux/io.github.moonlipe.Sqlion.desktop", dest = "/usr/share/applications/io.github.moonlipe.Sqlion.desktop", mode = "644" },
+    { source = "packaging/linux/io.github.moonlipe.Sqlion.metainfo.xml", dest = "/usr/share/metainfo/io.github.moonlipe.Sqlion.metainfo.xml", mode = "644" },
+    { source = "packaging/linux/icons/64.png", dest = "/usr/share/icons/hicolor/64x64/apps/io.github.moonlipe.Sqlion.png", mode = "644" },
+    { source = "packaging/linux/icons/128.png", dest = "/usr/share/icons/hicolor/128x128/apps/io.github.moonlipe.Sqlion.png", mode = "644" },
+    { source = "packaging/linux/icons/256.png", dest = "/usr/share/icons/hicolor/256x256/apps/io.github.moonlipe.Sqlion.png", mode = "644" },
+    { source = "packaging/linux/icons/sqlion.svg", dest = "/usr/share/icons/hicolor/scalable/apps/io.github.moonlipe.Sqlion.svg", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/licenses/sqlion/LICENSE", mode = "644", doc = true },
+    { source = "README.md", dest = "/usr/share/doc/sqlion/README.md", mode = "644", doc = true },
+]
+
+# shared-library names (not package names) so the same requirements work on Fedora, RHEL and openSUSE
+[package.metadata.generate-rpm.requires]
+"libEGL.so.1()(64bit)" = "*"
+"libGL.so.1()(64bit)" = "*"
+"libwayland-client.so.0()(64bit)" = "*"
+"libwayland-egl.so.1()(64bit)" = "*"
+"libX11.so.6()(64bit)" = "*"
+"libX11-xcb.so.1()(64bit)" = "*"
+"libxcb.so.1()(64bit)" = "*"
+"libXcursor.so.1()(64bit)" = "*"
+"libXi.so.6()(64bit)" = "*"
+"libxkbcommon.so.0()(64bit)" = "*"
+"libxkbcommon-x11.so.0()(64bit)" = "*"
+"libXrender.so.1()(64bit)" = "*"
 
 [profile.release]
 opt-level = 3

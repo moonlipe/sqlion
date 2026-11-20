@@ -1,0 +1,47 @@
+# Flatpak of the binary already compiled by the release workflow (x86_64, Ubuntu 22.04 glibc).
+# Expects the binary at target/x86_64-unknown-linux-gnu/release/sqlion (paths are relative to this file).
+#   flatpak-builder --user --install-deps-from=flathub --force-clean --repo=repo build packaging/linux/flatpak/io.github.moonlipe.Sqlion.yml
+#   flatpak build-bundle repo sqlion.flatpak io.github.moonlipe.Sqlion --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo
+id: io.github.moonlipe.Sqlion
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: sqlion
+finish-args:
+  - --share=ipc
+  # database servers
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # scripts, project folders and SQLite files can live anywhere in the home folder
+  - --filesystem=home
+modules:
+  - name: sqlion
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 sqlion /app/bin/sqlion
+      - install -Dm644 io.github.moonlipe.Sqlion.desktop /app/share/applications/io.github.moonlipe.Sqlion.desktop
+      - install -Dm644 io.github.moonlipe.Sqlion.metainfo.xml /app/share/metainfo/io.github.moonlipe.Sqlion.metainfo.xml
+      - install -Dm644 64.png /app/share/icons/hicolor/64x64/apps/io.github.moonlipe.Sqlion.png
+      - install -Dm644 128.png /app/share/icons/hicolor/128x128/apps/io.github.moonlipe.Sqlion.png
+      - install -Dm644 256.png /app/share/icons/hicolor/256x256/apps/io.github.moonlipe.Sqlion.png
+      - install -Dm644 sqlion.svg /app/share/icons/hicolor/scalable/apps/io.github.moonlipe.Sqlion.svg
+      - install -Dm644 LICENSE /app/share/licenses/io.github.moonlipe.Sqlion/LICENSE
+    sources:
+      - type: file
+        path: ../../../target/x86_64-unknown-linux-gnu/release/sqlion
+      - type: file
+        path: ../io.github.moonlipe.Sqlion.desktop
+      - type: file
+        path: ../io.github.moonlipe.Sqlion.metainfo.xml
+      - type: file
+        path: ../icons/64.png
+      - type: file
+        path: ../icons/128.png
+      - type: file
+        path: ../icons/256.png
+      - type: file
+        path: ../icons/sqlion.svg
+      - type: file
+        path: ../../../LICENSE
