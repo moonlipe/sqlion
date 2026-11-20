@@ -12,14 +12,12 @@ pub enum Icon {
     Play,
     PlayAll,
     Plus,
-    Minus,
     Check,
     Cross,
     Save,
     Undo,
     Refresh,
     Export,
-    Import,
     Search,
     Script,
     Plan,
@@ -56,6 +54,7 @@ fn p(r: Rect, x: f32, y: f32) -> Pos2 {
     pos2(r.left() + r.width() * x, r.top() + r.height() * y)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn arc(r: Rect, cx: f32, cy: f32, rx: f32, ry: f32, a0: f32, a1: f32, n: usize) -> Vec<Pos2> {
     (0..=n)
         .map(|i| {
@@ -118,9 +117,6 @@ pub fn paint(pt: &Painter, r: Rect, icon: Icon, col: Color32) {
             line(vec![p(r, 0.5, 0.18), p(r, 0.5, 0.82)]);
             line(vec![p(r, 0.18, 0.5), p(r, 0.82, 0.5)]);
         }
-        Icon::Minus => {
-            line(vec![p(r, 0.18, 0.5), p(r, 0.82, 0.5)]);
-        }
         Icon::Check => {
             line(vec![p(r, 0.16, 0.54), p(r, 0.4, 0.78), p(r, 0.86, 0.24)]);
         }
@@ -145,11 +141,6 @@ pub fn paint(pt: &Painter, r: Rect, icon: Icon, col: Color32) {
             line(vec![p(r, 0.14, 0.62), p(r, 0.14, 0.86), p(r, 0.86, 0.86), p(r, 0.86, 0.62)]);
             line(vec![p(r, 0.5, 0.7), p(r, 0.5, 0.14)]);
             line(vec![p(r, 0.3, 0.34), p(r, 0.5, 0.14), p(r, 0.7, 0.34)]);
-        }
-        Icon::Import => {
-            line(vec![p(r, 0.14, 0.62), p(r, 0.14, 0.86), p(r, 0.86, 0.86), p(r, 0.86, 0.62)]);
-            line(vec![p(r, 0.5, 0.14), p(r, 0.5, 0.7)]);
-            line(vec![p(r, 0.3, 0.5), p(r, 0.5, 0.7), p(r, 0.7, 0.5)]);
         }
         Icon::Search => {
             line(arc(r, 0.42, 0.42, 0.28, 0.28, 0.0, 2.0 * PI, 18));
@@ -415,10 +406,10 @@ fn styled_button(ui: &mut Ui, icon: Icon, text: &str, primary: bool) -> Response
 pub fn icon_color(icon: Icon, pl: &crate::theme::Palette, fallback: Color32) -> Color32 {
     match icon {
         Icon::Play | Icon::PlayAll | Icon::Check | Icon::Plus => pl.ok,
-        Icon::Trash | Icon::Cross | Icon::Minus => pl.err,
+        Icon::Trash | Icon::Cross => pl.err,
         Icon::Save | Icon::Undo => pl.warn,
         Icon::Key => pl.warn,
-        Icon::Table | Icon::View | Icon::Database | Icon::Search | Icon::Refresh | Icon::Export | Icon::Import | Icon::Diagram | Icon::Plug => pl.accent,
+        Icon::Table | Icon::View | Icon::Database | Icon::Search | Icon::Refresh | Icon::Export | Icon::Diagram | Icon::Plug => pl.accent,
         _ => fallback,
     }
 }
@@ -447,7 +438,6 @@ pub fn segment(ui: &mut Ui, icon: Icon, text: &str, active: bool) -> Response {
 /// A row for the navigator tree: icon + text + optional dim suffix.
 pub enum Lead<'a> {
     Icon(Icon, Color32),
-    Badge(&'a str, Color32),
     Conn(&'a crate::db::BadgeStyle),
 }
 
@@ -477,11 +467,6 @@ pub fn tree_row(ui: &mut Ui, lead: Lead, dot: Option<Color32>, text: RichText, s
         Lead::Icon(icon, col) => {
             let r = Rect::from_min_size(pos2(x0, rect.center().y - isz / 2.0), vec2(isz, isz));
             paint(pt, r, icon, col);
-            r
-        }
-        Lead::Badge(t, col) => {
-            let r = Rect::from_min_size(pos2(x0, rect.center().y - isz / 2.0), vec2(isz + 6.0, isz));
-            badge(pt, r, t, col);
             r
         }
         Lead::Conn(style) => {
@@ -560,9 +545,7 @@ mod tests {
     use egui::{CursorIcon, Event, RawInput};
 
     fn run(ctx: &egui::Context, pos: Option<Pos2>, t: f64, rect_out: &mut Option<Rect>, what: u8) -> CursorIcon {
-        let mut input = RawInput::default();
-        input.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, vec2(600.0, 300.0)));
-        input.time = Some(t);
+        let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(600.0, 300.0))), time: Some(t), ..Default::default() };
         if let Some(p) = pos {
             input.events.push(Event::PointerMoved(p));
         }

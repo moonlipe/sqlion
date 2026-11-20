@@ -17,7 +17,7 @@ pub enum TabKind {
 }
 
 /// Suffix shown on tabs whose connection is closed; running or reloading the tab reopens it.
-fn closed(sh: &Shared, conn: Option<&str>) -> &'static str {
+pub fn closed(sh: &Shared, conn: Option<&str>) -> &'static str {
     match conn {
         Some(c) if !sh.is_connected(c) => " (desc.)",
         _ => "",
@@ -29,16 +29,6 @@ pub struct Tab {
     pub kind: TabKind,
 }
 
-impl Tab {
-    pub fn title(&self, sh: &Shared) -> String {
-        match &self.kind {
-            TabKind::Welcome => "Bem-vindo".into(),
-            TabKind::Sql(s) => format!("{}{}{}", if s.dirty { "*" } else { "" }, s.title, closed(sh, s.conn.as_deref())),
-            TabKind::Table(t) => format!("{}{} ", t.table, closed(sh, Some(&t.conn))),
-            TabKind::Er(e) => format!("Diagrama {}", e.title(sh)),
-        }
-    }
-}
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum SqlCmd {
@@ -192,7 +182,6 @@ pub struct SqlTab {
     pub confirm_save: Option<usize>,
     pub save_confirmed: bool,
     pub new_script: bool,
-    pub typed_pair: Option<usize>,
     /// autocomplete waiting for metadata loaded in the background: (generation asked at, cursor)
     pub ac_wait: Option<(u64, usize)>,
     /// vertical scroll of the editor; Some in `set_scroll` restores it on the next frame
@@ -238,7 +227,6 @@ impl SqlTab {
             confirm_save: None,
             save_confirmed: false,
             new_script: false,
-            typed_pair: None,
             ac_wait: None,
             scroll_y: 0.0,
             set_scroll: None,
@@ -671,7 +659,7 @@ impl SqlTab {
                         let more = qr.has_more;
                         let added = qr.rows.len();
                         g.qr.rows.extend(qr.rows);
-                        g.row_state.extend(std::iter::repeat(RowState::Clean).take(added));
+                        g.row_state.extend(std::iter::repeat_n(RowState::Clean, added));
                         g.qr.has_more = more;
                         g.dirty = true;
                     }
@@ -1387,7 +1375,7 @@ impl TableTab {
     /// A tab that does not touch the connection: the metadata and the data load when it is shown.
     pub fn restored(sh: &Shared, conn: &str, schema: &str, table: &str, view: bool) -> TableTab {
         let meta = TableMeta::default();
-        let src = EditSource { conn: conn.into(), schema: schema.into(), table: table.into(), meta: meta.clone(), qualified: sh.qualified(conn, schema, table), kind: sh.kind(conn) };
+        let src = EditSource { meta: meta.clone(), qualified: sh.qualified(conn, schema, table), kind: sh.kind(conn) };
         TableTab {
             conn: conn.into(),
             schema: schema.into(),
@@ -1420,7 +1408,7 @@ impl TableTab {
                 }
             }
         }
-        self.src = EditSource { conn: conn.clone(), schema: schema.clone(), table: table.clone(), meta: meta.clone(), qualified: sh.qualified(&conn, &schema, &table), kind: sh.kind(&conn) };
+        self.src = EditSource { meta: meta.clone(), qualified: sh.qualified(&conn, &schema, &table), kind: sh.kind(&conn) };
         self.meta = meta;
         self.meta_pending = false;
         if let Some(g) = self.grid.as_mut() {
@@ -1483,7 +1471,7 @@ impl TableTab {
                                 let n = qr.rows.len();
                                 g.qr.has_more = qr.has_more;
                                 g.qr.rows.extend(qr.rows);
-                                g.row_state.extend(std::iter::repeat(RowState::Clean).take(n));
+                                g.row_state.extend(std::iter::repeat_n(RowState::Clean, n));
                                 g.dirty = true;
                             }
                         } else {
@@ -1951,7 +1939,7 @@ impl ErTab {
             let (ax, bx, dir) = if a.center().x < b.center().x { (a.right(), b.left(), 1.0) } else { (a.left(), b.right(), -1.0) };
             let (ax, bx) = if e.from == e.to { (a.right(), a.right()) } else { (ax, bx) };
             let mid = (ax + bx) / 2.0;
-            let pts = vec![egui::pos2(ax, ay), egui::pos2(ax + dir * 14.0, ay), egui::pos2(mid.max(ax + dir * 14.0).min(bx - dir * 14.0).max(if dir > 0.0 { ax } else { bx - 14.0 }), by), egui::pos2(bx - dir * 14.0, by), egui::pos2(bx, by)];
+            let pts = [egui::pos2(ax, ay), egui::pos2(ax + dir * 14.0, ay), egui::pos2(mid.max(ax + dir * 14.0).min(bx - dir * 14.0).max(if dir > 0.0 { ax } else { bx - 14.0 }), by), egui::pos2(bx - dir * 14.0, by), egui::pos2(bx, by)];
             painter.add(egui::Shape::line(vec![pts[0], pts[1], egui::pos2(pts[1].x, by), pts[3], pts[4]], line));
             // arrow head
             painter.add(egui::Shape::convex_polygon(
@@ -2232,6 +2220,15 @@ mod editor_tests {
     }
 
     #[test]
+    fn tabs_of_closed_connections_are_marked() {
+        let (mut sh, id) = sqlite();
+        assert_eq!(closed(&sh, Some(&id)), "");
+        assert_eq!(closed(&sh, None), "", "a tab without connection is not marked");
+        sh.disconnect(&id);
+        assert_eq!(closed(&sh, Some(&id)), " (desc.)");
+    }
+
+    #[test]
     fn highlight_names_come_from_cache_in_background() {
         let (mut sh, id) = sqlite();
         let mut tab = SqlTab::new(Some(id.clone()), "select first_name from customers".into(), "t".into());
@@ -2296,10 +2293,7 @@ mod editor_tests {
     /// Runs one frame of the editor with the given typed events.
     fn frame(ctx: &egui::Context, sh: &mut Shared, t: &mut SqlTab, events: Vec<Event>, time: &mut f64) {
         *time += 0.05;
-        let mut input = RawInput::default();
-        input.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(900.0, 600.0)));
-        input.time = Some(*time);
-        input.events = events;
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(900.0, 600.0))), time: Some(*time), events, ..Default::default() };
         let mut out = ctx.run_ui(input, |ui| t.show(ui, sh, 7, true));
         out.textures_delta.clear();
     }

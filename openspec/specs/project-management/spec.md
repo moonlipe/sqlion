@@ -1,7 +1,7 @@
 # project-management Specification
 
 ## Purpose
-TBD - created by archiving change project-management-query-cancel-and-memory. Update Purpose after archive.
+Define como o usuário cria, abre e organiza projetos (pasta com conexões, pastas de organização e scripts), move conexões entre eles e os versiona com git.
 
 ## Requirements
 

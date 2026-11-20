@@ -101,7 +101,7 @@ fn csv_cell(v: &Option<String>, o: &ExportOptions) -> String {
     };
     let q = o.quote_char.chars().next();
     let mut s = s;
-    if o.escape_formulas && s.starts_with(|c| matches!(c, '=' | '+' | '-' | '@')) && s.parse::<f64>().is_err() {
+    if o.escape_formulas && s.starts_with(['=', '+', '-', '@']) && s.parse::<f64>().is_err() {
         s = format!("'{}", s);
     }
     let Some(q) = q else { return s };
@@ -289,7 +289,7 @@ fn markdown(r: &QueryResult, o: &ExportOptions) -> String {
 fn txt(r: &QueryResult, o: &ExportOptions) -> String {
     let show = |v: &Option<String>| match v {
         None => if o.show_nulls { "[NULL]".to_string() } else { String::new() },
-        Some(s) => s.replace('\n', " ").replace('\t', " "),
+        Some(s) => s.replace(['\n', '\t'], " "),
     };
     let mut w: Vec<usize> = r.columns.iter().map(|c| c.chars().count()).collect();
     for row in &r.rows {
@@ -349,12 +349,11 @@ fn dbunit(r: &QueryResult, o: &ExportOptions) -> String {
 pub struct CsvOptions {
     pub delimiter: char, // ","
     pub quote: char,     // "
-    pub header: bool,    // true
 }
 
 impl Default for CsvOptions {
     fn default() -> Self {
-        CsvOptions { delimiter: ',', quote: '"', header: true }
+        CsvOptions { delimiter: ',', quote: '"' }
     }
 }
 

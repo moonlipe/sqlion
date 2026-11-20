@@ -8,6 +8,9 @@ use crate::icons::Icon;
 use crate::tabs::*;
 use egui::{Color32, RichText};
 
+/// (name, value) pairs of the parameters and variables asked before running
+type Pairs = Vec<(String, String)>;
+
 pub enum Dialog {
     Conn { cfg: Box<ConnConfig>, is_new: bool, msg: Option<Result<String, String>>, pass: String },
     Export { conn: String, sql: String, rows: Option<QueryResult>, opts: Box<ExportOptions>, dir: String, file: String, to_clipboard: bool, msg: Option<Result<String, String>> },
@@ -487,7 +490,7 @@ impl App {
                                 self.sh.param_vals.retain(|(n, _)| n != k);
                                 self.sh.param_vals.push((k.clone(), v.clone()));
                             }
-                            let (vars, params): (Vec<(String, String)>, Vec<(String, String)>) = pairs.into_iter().partition(|(k, _)| k.starts_with("${"));
+                            let (vars, params): (Pairs, Pairs) = pairs.into_iter().partition(|(k, _)| k.starts_with("${"));
                             // a variable is text put in the SQL as typed; a parameter becomes a literal
                             let vars: Vec<(String, String)> = vars.into_iter().map(|(k, v)| (k[2..k.len() - 1].to_string(), v)).collect();
                             let final_stmts: Vec<String> = stmts.iter().map(|s| crate::sqltext::substitute_params(&crate::sqltext::substitute_vars(s, &vars), &params)).collect();
@@ -549,7 +552,7 @@ impl App {
                             ui.ctx().copy_text(dir.display().to_string());
                         }
                         if ui.small_button("Abrir").clicked() {
-                            let _ = crate::shared::open_path(&dir);
+                            crate::shared::open_path(&dir);
                         }
                     });
                     ui.add_space(4.0);
@@ -1123,7 +1126,7 @@ fn do_export(sh: &Shared, conn: &str, sql: &str, rows: Option<&QueryResult>, opt
 #[allow(clippy::too_many_arguments)]
 fn do_import(sh: &mut Shared, conn: &str, schema: &str, table: &str, path: &str, delim: &str, header: bool, create: bool) -> Result<String, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("Não foi possível ler o arquivo: {}", e))?;
-    let o = CsvOptions { delimiter: delim.chars().next().unwrap_or(','), quote: '"', header };
+    let o = CsvOptions { delimiter: delim.chars().next().unwrap_or(','), quote: '"' };
     let mut rows = export::parse_csv(&text, &o);
     if rows.is_empty() {
         return Err("Arquivo vazio".into());

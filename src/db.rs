@@ -249,15 +249,6 @@ impl ConnConfig {
             }
         }
     }
-    pub fn url(&self) -> String {
-        match self.kind {
-            Kind::Sqlite => format!("sqlite:{}", self.database),
-            Kind::Postgres => format!("postgresql://{}:{}/{}", self.host, self.port, self.database),
-            Kind::Mysql => format!("mysql://{}:{}/{}", self.host, self.port, self.database),
-            Kind::SqlServer => format!("sqlserver://{}:{}/{}", self.host, self.port, self.database),
-            Kind::Mongo => format!("mongodb://{}:{}/{}", self.host, self.port, self.database),
-        }
-    }
 }
 
 #[derive(Clone, Default, Debug)]
@@ -269,7 +260,6 @@ pub struct QueryResult {
     pub has_more: bool,
     pub sql: String,
     pub offset: usize,
-    pub message: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -279,7 +269,6 @@ pub struct ColInfo {
     pub nullable: bool,
     pub default: Option<String>,
     pub pk: bool,
-    pub extra: String,
 }
 
 impl ColInfo {
@@ -307,7 +296,6 @@ pub struct IdxInfo {
     pub name: String,
     pub unique: bool,
     pub columns: Vec<String>,
-    pub typ: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -481,10 +469,6 @@ impl Session {
         self.mode = m;
         self.sync_snap();
         Ok(())
-    }
-
-    pub fn set_auto_commit(&mut self, on: bool) -> Result<()> {
-        self.set_mode(TxMode::from_auto_commit(on))
     }
 
     pub fn commit(&mut self) -> Result<()> {
@@ -670,11 +654,10 @@ impl Session {
                             }
                             out.rows.push((0..r.len()).map(|i| r.get(i).map(|s| s.to_string())).collect());
                         }
-                        M::CommandComplete(n) => {
-                            if out.columns.is_empty() {
+                        M::CommandComplete(n)
+                            if out.columns.is_empty() => {
                                 out.affected = Some(n);
                             }
-                        }
                         _ => {}
                     }
                 }
@@ -782,7 +765,6 @@ impl Session {
                         nullable: row[3].as_deref() != Some("1"),
                         default: row[4].clone(),
                         pk: row[5].as_deref().map(|s| s != "0").unwrap_or(false),
-                        extra: String::new(),
                     });
                 }
                 let r = self.run(&format!("PRAGMA index_list({})", Kind::Sqlite.quote(table)), 0, 0)?;
@@ -793,7 +775,6 @@ impl Session {
                         name,
                         unique: row[2].as_deref() == Some("1"),
                         columns: cols.rows.iter().filter_map(|c| c[2].clone()).collect(),
-                        typ: "BTREE".into(),
                     });
                 }
                 let r = self.run(&format!("PRAGMA foreign_key_list({})", Kind::Sqlite.quote(table)), 0, 0)?;
@@ -832,7 +813,6 @@ impl Session {
                         nullable: row[2].as_deref() == Some("YES"),
                         default: row[3].clone(),
                         pk: row[4].as_deref().map(|s| s != "0").unwrap_or(false),
-                        extra: String::new(),
                     });
                 }
                 let q = format!("SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = {} AND tablename = {} ORDER BY 1", lit(schema), lit(table));
@@ -842,7 +822,7 @@ impl Session {
                         .rfind('(')
                         .map(|i| def[i + 1..].trim_end_matches(')').split(',').map(|s| s.trim().trim_matches('"').to_string()).collect())
                         .unwrap_or_default();
-                    m.indexes.push(IdxInfo { name: row[0].clone().unwrap_or_default(), unique: def.contains("UNIQUE"), columns: cols, typ: "btree".into() });
+                    m.indexes.push(IdxInfo { name: row[0].clone().unwrap_or_default(), unique: def.contains("UNIQUE"), columns: cols });
                 }
                 let q = format!(
                     "SELECT con.conname, pg_get_constraintdef(con.oid) FROM pg_constraint con JOIN pg_class cl ON cl.oid = con.conrelid JOIN pg_namespace n ON n.oid = cl.relnamespace WHERE con.contype = 'f' AND n.nspname = {} AND cl.relname = {}",
@@ -869,7 +849,6 @@ impl Session {
                         nullable: row[2].as_deref() == Some("YES"),
                         default: row[3].clone(),
                         pk: row[4].as_deref() == Some("PRI"),
-                        extra: row[5].clone().unwrap_or_default(),
                     });
                 }
                 let q = format!("SHOW INDEX FROM {}", self.qualified(schema, table));
@@ -880,7 +859,7 @@ impl Session {
                         if let Some(i) = m.indexes.iter_mut().find(|i| i.name == name) {
                             i.columns.push(col);
                         } else {
-                            m.indexes.push(IdxInfo { name, unique: row[1].as_deref() == Some("0"), columns: vec![col], typ: row.get(10).cloned().flatten().unwrap_or_default() });
+                            m.indexes.push(IdxInfo { name, unique: row[1].as_deref() == Some("0"), columns: vec![col] });
                         }
                     }
                 }
@@ -1261,7 +1240,7 @@ mod tests {
     #[test]
     fn manual_commit_rollback() {
         let mut s = open("manual_commit_rollback");
-        s.set_auto_commit(false).unwrap();
+        s.set_mode(TxMode::from_auto_commit(false)).unwrap();
         s.run("DELETE FROM order_items", 0, 0).unwrap();
         assert!(s.tx_open);
         assert_eq!(s.run("SELECT COUNT(*) FROM order_items", 0, 0).unwrap().rows[0][0].as_deref(), Some("0"));
@@ -1408,11 +1387,11 @@ mod pg_tests {
         let ma = s.table_meta("public", "dbr_a").unwrap();
         assert!(ma.columns[0].pk && !ma.columns[1].nullable);
         println!("{}", build_ddl(Kind::Postgres, "public", "dbr_b", &m));
-        s.set_auto_commit(false).unwrap();
+        s.set_mode(TxMode::from_auto_commit(false)).unwrap();
         s.run("DELETE FROM dbr_a", 0, 0).unwrap();
         s.rollback().unwrap();
         assert_eq!(s.run("SELECT count(*) FROM dbr_a", 0, 0).unwrap().rows[0][0].as_deref(), Some("250"));
-        s.set_auto_commit(true).unwrap();
+        s.set_mode(TxMode::from_auto_commit(true)).unwrap();
         s.run("DROP TABLE dbr_b", 0, 0).unwrap();
         s.run("DROP TABLE dbr_a", 0, 0).unwrap();
     }
@@ -1861,7 +1840,7 @@ mod mysql_tests {
             format!("CREATE PROCEDURE {}() BEGIN SELECT COUNT(*) FROM {}; END", q("dbr_conta"), q("dbr_a")),
             format!("CREATE TRIGGER {} BEFORE INSERT ON {} FOR EACH ROW SET NEW.obs = 'novo'", q("dbr_trg"), q("dbr_a")),
         ] {
-            let _ = s.run(&format!("DROP {} IF EXISTS {}", st.split_whitespace().nth(1).unwrap(), st.split('`').nth(3).map(|n| q(n)).unwrap_or_default()), 0, 0);
+            let _ = s.run(&format!("DROP {} IF EXISTS {}", st.split_whitespace().nth(1).unwrap(), st.split('`').nth(3).map(&q).unwrap_or_default()), 0, 0);
             s.run(&st, 0, 0).unwrap_or_else(|e| panic!("{}: {}", st, e));
         }
         assert!(s.objects("function", &db).unwrap().iter().any(|o| o.name == "dbr_soma"));
@@ -1874,12 +1853,12 @@ mod mysql_tests {
         assert!(s.objects("index", &db).unwrap().iter().any(|o| o.name == "dbr_idx"));
         assert!(s.object_source("index", &db, "dbr_idx", "dbr_a").unwrap().contains("CREATE INDEX"));
         // manual commit / rollback
-        s.set_auto_commit(false).unwrap();
+        s.set_mode(TxMode::from_auto_commit(false)).unwrap();
         s.run(&format!("DELETE FROM {}", q("dbr_b")), 0, 0).unwrap();
         s.run(&format!("INSERT INTO {} (id, a_id) VALUES (1, 1)", q("dbr_b")), 0, 0).unwrap();
         s.rollback().unwrap();
         assert_eq!(s.run(&format!("SELECT COUNT(*) FROM {}", q("dbr_b")), 0, 0).unwrap().rows[0][0].as_deref(), Some("0"));
-        s.set_auto_commit(true).unwrap();
+        s.set_mode(TxMode::from_auto_commit(true)).unwrap();
         for st in [format!("DROP TRIGGER {}", q("dbr_trg")), format!("DROP PROCEDURE {}", q("dbr_conta")), format!("DROP FUNCTION {}", q("dbr_soma")), format!("DROP TABLE {}", q("dbr_b")), format!("DROP TABLE {}", q("dbr_a"))] {
             let _ = s.run(&st, 0, 0);
         }

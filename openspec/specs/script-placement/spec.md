@@ -1,7 +1,7 @@
 # script-placement Specification
 
 ## Purpose
-TBD - created by archiving change project-management-query-cancel-and-memory. Update Purpose after archive.
+Define onde cada script SQL mora (num projeto ou na pasta global de scripts), onde os novos são criados e como movê-los entre esses lugares.
 
 ## Requirements
 

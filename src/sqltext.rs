@@ -328,7 +328,6 @@ pub fn split_statements(s: &str, delim: &str) -> Vec<(usize, usize)> {
     let mut starts_create = false;
     let mut first_kw: Option<String> = None;
     let delim_c = delim.chars().next().unwrap_or(';');
-    let mut dollar_open = false;
     let mut first_tok = true;
     let mut ctl = false; // the statement is a control command (@set, @echo...): it ends at the end of the line
     for (k, a, b) in toks {
@@ -343,7 +342,7 @@ pub fn split_statements(s: &str, delim: &str) -> Vec<(usize, usize)> {
                     ctl = false;
                     continue;
                 }
-                if t.matches('\n').count() >= 2 && start.is_some() && depth_block == 0 && !dollar_open {
+                if t.matches('\n').count() >= 2 && start.is_some() && depth_block == 0 {
                     out.push((start.unwrap(), last_end));
                     start = None;
                     first_kw = None;
@@ -378,15 +377,13 @@ pub fn split_statements(s: &str, delim: &str) -> Vec<(usize, usize)> {
             starts_create = t.eq_ignore_ascii_case("create");
         }
         if starts_create && k == Tok::Keyword {
-            if t.eq_ignore_ascii_case("begin") {
-                depth_block += 1;
-            } else if t.eq_ignore_ascii_case("case") {
+            if t.eq_ignore_ascii_case("begin") || t.eq_ignore_ascii_case("case") {
                 depth_block += 1;
             } else if t.eq_ignore_ascii_case("end") && depth_block > 0 {
                 depth_block -= 1;
             }
         }
-        if k == Tok::Op && t.starts_with(delim_c) && depth_block == 0 && !dollar_open {
+        if k == Tok::Op && t.starts_with(delim_c) && depth_block == 0 {
             out.push((start.unwrap(), last_end.max(a)));
             start = None;
             first_kw = None;
@@ -823,11 +820,6 @@ pub fn format_sql(s: &str, upper: bool) -> String {
         res.push('\n');
     }
     res
-}
-
-pub fn selected_columns_hint(sql: &str) -> Vec<String> {
-    let _ = sql;
-    Vec::new()
 }
 
 /// Names after FROM/JOIN: (table, alias)

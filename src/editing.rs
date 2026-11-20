@@ -237,7 +237,7 @@ pub fn detect_source(sh: &mut Shared, conn: &str, sql: &str, columns: &[String])
         // still editable: rows are identified by all selected columns
     }
     let qualified = sh.qualified(conn, &schema, &real);
-    Ok(EditSource { conn: conn.into(), schema, table: real, meta, qualified, kind })
+    Ok(EditSource { meta, qualified, kind })
 }
 
 #[cfg(test)]
@@ -357,7 +357,7 @@ mod tests {
         let qr = crate::db::QueryResult { columns: vec!["_id".into(), "age".into()], rows: vec![vec![Some("65f1a2b3c4d5e6f708192a3b".into()), Some("30".into())]], ..Default::default() };
         let mut g = GridState::new(qr, "m");
         g.set_cell(0, 1, Some("31".into()));
-        let src = EditSource { conn: "c".into(), schema: "db1".into(), table: "users".into(), meta: meta.clone(), qualified: "db.getSiblingDB(\"db1\").getCollection(\"users\")".into(), kind: Kind::Mongo };
+        let src = EditSource { meta: meta.clone(), qualified: "db.getSiblingDB(\"db1\").getCollection(\"users\")".into(), kind: Kind::Mongo };
         let s = change_script(&g, &src);
         assert_eq!(s[0], "db.getSiblingDB(\"db1\").getCollection(\"users\").updateOne({\"_id\": {\"$oid\":\"65f1a2b3c4d5e6f708192a3b\"}}, {\"$set\": {\"age\": 31}})");
         let src = EditSource { kind: Kind::SqlServer, qualified: "[dbo].[users]".into(), ..src };

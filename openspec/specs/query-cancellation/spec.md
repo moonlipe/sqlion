@@ -1,7 +1,7 @@
 # query-cancellation Specification
 
 ## Purpose
-TBD - created by archiving change project-management-query-cancel-and-memory. Update Purpose after archive.
+Permite interromper uma consulta ou script em execução em qualquer banco suportado, manualmente ou por tempo limite, mostrando o tempo decorrido enquanto roda.
 
 ## Requirements
 

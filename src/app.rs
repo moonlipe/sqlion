@@ -234,7 +234,7 @@ impl App {
         }
         let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         if let Ok(t) = std::fs::read_to_string(p) {
-            let linked = self.sh.store.script_conn_of(p).filter(|c| self.sh.cfg(c).is_some());
+            let linked = self.sh.script_conn(p);
             let c = linked.or_else(|| self.current_conn());
             self.open_sql(c, t, Some(name));
             if let Some(Tab { kind: TabKind::Sql(s), .. }) = self.tabs.last_mut() {
@@ -907,7 +907,6 @@ impl App {
     }
 
     fn toolbar_left(&mut self, ui: &mut Ui) {
-        let pl = pal(self.sh.store.prefs.dark);
         ui.horizontal_wrapped(|ui| {
             if icons::button(ui, Icon::Plug, "Nova conexão").clicked() {
                 self.sh.req(Req::NewConn);
@@ -1071,8 +1070,8 @@ impl App {
                 for i in 0..self.tabs.len() {
                     let (title, icon, dirty) = match &self.tabs[i].kind {
                         TabKind::Welcome => ("Bem-vindo".to_string(), Icon::Home, false),
-                        TabKind::Sql(s) => (s.title.clone(), Icon::Script, s.dirty),
-                        TabKind::Table(t) => (t.table.clone(), if t.view { Icon::View } else { Icon::Table }, t.grid.as_ref().map(|g| g.pending_changes() > 0).unwrap_or(false)),
+                        TabKind::Sql(s) => (format!("{}{}", s.title, crate::tabs::closed(&self.sh, s.conn.as_deref())), Icon::Script, s.dirty),
+                        TabKind::Table(t) => (format!("{}{}", t.table, crate::tabs::closed(&self.sh, Some(&t.conn))), if t.view { Icon::View } else { Icon::Table }, t.grid.as_ref().map(|g| g.pending_changes() > 0).unwrap_or(false)),
                         TabKind::Er(e) => (format!("Diagrama {}", e.title(&self.sh)), Icon::Diagram, false),
                     };
                     let (r, x) = icons::tab_item(ui, icon, &title, self.active == i, dirty);
@@ -1483,7 +1482,7 @@ impl App {
                     }
                 }
                 if ui.button("Abrir a pasta").clicked() {
-                    let _ = crate::shared::open_path(&dir);
+                    crate::shared::open_path(&dir);
                     ui.close();
                 }
                 if ui.button("Copiar o caminho").clicked() {
@@ -1506,7 +1505,7 @@ impl App {
                     Some(_) => "alterado",
                     None => "",
                 };
-                let conn_hint = self.sh.store.script_conn_of(&p).filter(|c| self.sh.cfg(c).is_some()).map(|c| self.sh.conn_name(&c)).unwrap_or_default();
+                let conn_hint = self.sh.script_conn(&p).map(|c| self.sh.conn_name(&c)).unwrap_or_default();
                 let r = icons::tree_row(ui, icons::Lead::Icon(Icon::Script, pl.weak), dot, RichText::new(&name), suffix, false, None);
                 let r = if conn_hint.is_empty() { r } else { r.on_hover_text(format!("Última conexão: {}", conn_hint)) };
                 self.dnd_source(ui, &r, Dragged::Script(p.clone()), &name);
@@ -2242,10 +2241,7 @@ mod dnd_tests {
         let mut t = 0.0;
         let mut frame = |events: Vec<Event>, got: &mut Option<String>, rows: &mut Vec<Rect>| {
             t += 0.05;
-            let mut input = RawInput::default();
-            input.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 300.0)));
-            input.time = Some(t);
-            input.events = events;
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 300.0))), time: Some(t), events, ..Default::default() };
             let mut out = ctx.run_ui(input, |ui| {
                 rows.clear();
                 let a = icons::tree_row(ui, Lead::Icon(Icon::Table, egui::Color32::GRAY), None, egui::RichText::new("conexão"), "", false, None);

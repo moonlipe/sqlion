@@ -1,7 +1,7 @@
 # empty-workspace Specification
 
 ## Purpose
-TBD - created by archiving change project-management-query-cancel-and-memory. Update Purpose after archive.
+Mantém o Sqlion aberto quando todas as abas são fechadas, mostrando uma área de trabalho vazia com atalhos para começar de novo.
 
 ## Requirements
 

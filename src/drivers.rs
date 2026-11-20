@@ -233,7 +233,6 @@ pub fn ms_meta(ms: &mut Ms, schema: &str, table: &str) -> Result<TableMeta> {
             nullable: row[2].as_deref() == Some("YES"),
             default: row[3].clone(),
             pk: row[4].as_deref().map(|s| s != "0").unwrap_or(false),
-            extra: if row[5].as_deref() == Some("1") { "identity".into() } else { String::new() },
         });
     }
     let q = format!(
@@ -247,7 +246,6 @@ pub fn ms_meta(ms: &mut Ms, schema: &str, table: &str) -> Result<TableMeta> {
                 name: row[0].clone().unwrap_or_default(),
                 unique: matches!(row[1].as_deref(), Some("1")),
                 columns: row[2].clone().unwrap_or_default().split(',').map(|s| s.to_string()).collect(),
-                typ: "".into(),
             });
         }
     }
@@ -314,9 +312,7 @@ impl Mongo {
         }
         if let Some(rest) = low.strip_prefix("use ") {
             self.db = rest.trim().to_string();
-            let mut r = QueryResult::default();
-            r.affected = Some(0);
-            return Ok(r);
+            return Ok(QueryResult { affected: Some(0), ..Default::default() });
         }
         if !t.starts_with("db") {
             return Err(anyhow!("Comando MongoDB inválido. Use por exemplo: db.minhaColecao.find({{}}) — ou show collections"));
@@ -531,12 +527,12 @@ impl Mongo {
         }
         seen.sort_by_key(|(k, _)| if k == "_id" { 0 } else { 1 });
         for (k, t) in seen {
-            m.columns.push(ColInfo { pk: k == "_id", nullable: k != "_id", name: k, typ: t, default: None, extra: String::new() });
+            m.columns.push(ColInfo { pk: k == "_id", nullable: k != "_id", name: k, typ: t, default: None });
         }
         if let Ok(cur) = c.list_indexes().run() {
             for ix in cur.flatten() {
                 let o = ix.options.clone().unwrap_or_default();
-                m.indexes.push(IdxInfo { name: o.name.unwrap_or_default(), unique: o.unique.unwrap_or(false), columns: ix.keys.keys().cloned().collect(), typ: "".into() });
+                m.indexes.push(IdxInfo { name: o.name.unwrap_or_default(), unique: o.unique.unwrap_or(false), columns: ix.keys.keys().cloned().collect() });
             }
         }
         m.ddl = format!(

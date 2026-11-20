@@ -26,7 +26,6 @@ pub enum JobMsg {
 
 pub struct Job {
     pub rx: Receiver<JobMsg>,
-    pub total: usize,
     pub done: usize,
     pub started: Instant,
     pub cancel: Arc<CancelState>,
@@ -87,7 +86,6 @@ pub fn cancelled_message(reason: &str) -> String {
 
 pub fn spawn_job(sess: Arc<Mutex<Session>>, stmts: Vec<JobStmt>, ctx: egui::Context) -> Job {
     let (tx, rx) = channel();
-    let total = stmts.len();
     let cancel = Arc::new(CancelState::default());
     let state = cancel.clone();
     std::thread::spawn(move || {
@@ -122,7 +120,7 @@ pub fn spawn_job(sess: Arc<Mutex<Session>>, stmts: Vec<JobStmt>, ctx: egui::Cont
         let _ = tx.send(JobMsg::Finished);
         ctx.request_repaint();
     });
-    Job { rx, total, done: 0, started: Instant::now(), cancel }
+    Job { rx, done: 0, started: Instant::now(), cancel }
 }
 
 pub enum Req {
@@ -329,9 +327,8 @@ impl Shared {
     }
 
     /// The connection a saved script was last executed on, if it still exists.
-    pub fn script_conn(&self, file_name: &str) -> Option<String> {
-        let id = self.store.script_conns.get(file_name)?;
-        self.cfg(id).map(|c| c.id.clone())
+    pub fn script_conn(&self, path: &std::path::Path) -> Option<String> {
+        self.store.script_conn_of(path).filter(|c| self.cfg(c).is_some())
     }
 
     /// Remembers that the script (identified by its file name) ran on `conn`.
@@ -517,6 +514,35 @@ impl Shared {
     }
 }
 
+/// Opens a folder in the system file manager (Linux, macOS and Windows).
+pub fn open_path(path: &std::path::Path) {
+    let cmd = if cfg!(target_os = "windows") {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(cmd).arg(path).spawn();
+}
+
+/// Gives freed memory back to the operating system.
+///
+/// glibc keeps the memory of dropped results (especially from the job threads' own arenas) in its free lists, so the
+/// process stays at its peak size after tabs are closed. Other platforms return memory on their own.
+pub fn release_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // SAFETY: plain glibc call with no pointers
+        unsafe {
+            malloc_trim(0);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,17 +566,17 @@ mod tests {
         sh.connect(&b).unwrap();
         let mut t = crate::tabs::SqlTab::new(Some(a.clone()), "select 1".into(), "t".into());
         t.file = Some(std::path::PathBuf::from("/tmp/scripts/Script-1.sql"));
-        assert_eq!(sh.script_conn("Script-1.sql"), None, "never executed yet");
+        assert_eq!(sh.script_conn(t.file.as_deref().unwrap()), None, "never executed yet");
         t.start_confirmed(&mut sh, &a, vec!["select 1".into()], false);
-        assert_eq!(sh.script_conn("Script-1.sql"), Some(a.clone()));
+        assert_eq!(sh.script_conn(t.file.as_deref().unwrap()), Some(a.clone()));
         t.start_confirmed(&mut sh, &b, vec!["select 1".into()], false);
-        assert_eq!(sh.script_conn("Script-1.sql"), Some(b.clone()), "the last execution wins");
+        assert_eq!(sh.script_conn(t.file.as_deref().unwrap()), Some(b.clone()), "the last execution wins");
         assert_eq!(sh.store.last_exec_conn, Some(b.clone()));
         // another script keeps its own connection
-        assert_eq!(sh.script_conn("Script-2.sql"), None);
+        assert_eq!(sh.script_conn(std::path::Path::new("/tmp/scripts/Script-2.sql")), None);
         // a deleted connection is forgotten
         sh.store.connections.retain(|c| c.id != b);
-        assert_eq!(sh.script_conn("Script-1.sql"), None);
+        assert_eq!(sh.script_conn(t.file.as_deref().unwrap()), None);
     }
 
     #[test]
@@ -560,7 +586,7 @@ mod tests {
         let mut c = ConnConfig::new(Kind::Sqlite);
         c.database = p.to_string_lossy().to_string();
         let mut s = Session::open(&c).unwrap();
-        s.set_auto_commit(false).unwrap();
+        s.set_mode(crate::db::TxMode::from_auto_commit(false)).unwrap();
         let sess = Arc::new(Mutex::new(s));
         let stmts = vec![
             JobStmt { sql: "DELETE FROM order_items".into(), limit: 0, offset: 0, tag: 0 },
@@ -570,15 +596,10 @@ mod tests {
         let job = spawn_job(sess.clone(), stmts, egui::Context::default());
         let mut errors = Vec::new();
         let mut items = 0;
-        loop {
-            match job.rx.recv().unwrap() {
-                JobMsg::Item(it) => {
-                    items += 1;
-                    if let Err(e) = it.res {
-                        errors.push(e);
-                    }
-                }
-                JobMsg::Finished => break,
+        while let JobMsg::Item(it) = job.rx.recv().unwrap() {
+            items += 1;
+            if let Err(e) = it.res {
+                errors.push(e);
             }
         }
         assert_eq!(items, 2, "the script stops at the first error");
@@ -646,7 +667,7 @@ mod tests {
     #[test]
     #[ignore]
     fn measure_memory_across_queries() {
-        let (mut sh, id) = sqlite_shared("mem", crate::db::TxMode::Auto);
+        let (sh, id) = sqlite_shared("mem", crate::db::TxMode::Auto);
         let sess = sh.session(&id).unwrap();
         let sql = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 200) SELECT x, hex(randomblob(100000)) AS big FROM c";
         let base = rss_mb();
@@ -671,7 +692,7 @@ mod tests {
 
     #[test]
     fn cancelling_a_long_query_frees_the_session() {
-        let (mut sh, id) = sqlite_shared("cancel", crate::db::TxMode::Auto);
+        let (sh, id) = sqlite_shared("cancel", crate::db::TxMode::Auto);
         let sess = sh.session(&id).unwrap();
         let stmts = vec![
             JobStmt { sql: SLOW_SQL.into(), limit: 0, offset: 0, tag: 0 },
@@ -680,7 +701,7 @@ mod tests {
         let job = spawn_job(sess.clone(), stmts, egui::Context::default());
         std::thread::sleep(std::time::Duration::from_millis(300));
         let t = std::time::Instant::now();
-        assert_eq!(job.cancel("").unwrap(), true);
+        assert!(job.cancel("").unwrap());
         let items = wait_finished(&job);
         assert!(t.elapsed() < std::time::Duration::from_secs(5), "interrupted promptly");
         assert_eq!(items.len(), 1, "the remaining statement is not run");
@@ -741,7 +762,7 @@ mod tests {
 
     #[test]
     fn cancelling_keeps_the_transaction_open_in_manual_mode() {
-        let (mut sh, id) = sqlite_shared("cancel_tx", crate::db::TxMode::Manual);
+        let (sh, id) = sqlite_shared("cancel_tx", crate::db::TxMode::Manual);
         let sess = sh.session(&id).unwrap();
         sess.lock().unwrap().run("UPDATE products SET in_stock = 1 WHERE product_id <= 2", 0, 0).unwrap();
         let job = spawn_job(sess.clone(), vec![JobStmt { sql: SLOW_SQL.into(), limit: 0, offset: 0, tag: 0 }], egui::Context::default());
@@ -757,7 +778,7 @@ mod tests {
 
     #[test]
     fn cancel_before_the_job_gets_the_session_skips_everything() {
-        let (mut sh, id) = sqlite_shared("cancel_early", crate::db::TxMode::Auto);
+        let (sh, id) = sqlite_shared("cancel_early", crate::db::TxMode::Auto);
         let sess = sh.session(&id).unwrap();
         let guard = sess.lock().unwrap();
         let job = spawn_job(sess.clone(), vec![JobStmt { sql: "SELECT 1".into(), limit: 0, offset: 0, tag: 0 }], egui::Context::default());
@@ -840,34 +861,5 @@ mod tests {
         sh.password_declined.insert(id.clone());
         let _ = sh.connect(&id);
         assert!(sh.need_password.is_none());
-    }
-}
-
-/// Opens a folder in the system file manager (Linux, macOS and Windows).
-pub fn open_path(path: &std::path::Path) {
-    let cmd = if cfg!(target_os = "windows") {
-        "explorer"
-    } else if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    };
-    let _ = std::process::Command::new(cmd).arg(path).spawn();
-}
-
-/// Gives freed memory back to the operating system.
-///
-/// glibc keeps the memory of dropped results (especially from the job threads' own arenas) in its free lists, so the
-/// process stays at its peak size after tabs are closed. Other platforms return memory on their own.
-pub fn release_memory() {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    {
-        extern "C" {
-            fn malloc_trim(pad: usize) -> i32;
-        }
-        // SAFETY: plain glibc call with no pointers
-        unsafe {
-            malloc_trim(0);
-        }
     }
 }

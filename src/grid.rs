@@ -27,9 +27,6 @@ pub enum RowState {
 /// Where the rows come from, so that edits can be written back.
 #[derive(Clone)]
 pub struct EditSource {
-    pub conn: String,
-    pub schema: String,
-    pub table: String,
     pub meta: TableMeta,
     pub qualified: String,
     pub kind: crate::db::Kind,
@@ -878,8 +875,8 @@ fn show_grid_table(ui: &mut Ui, g: &mut GridState, null_text: &str, actions: &mu
         .sense(Sense::click_and_drag())
         .cell_layout(Layout::left_to_right(Align::Center))
         .column(Column::exact(48.0));
-    for c in 0..ncols {
-        tb = tb.column(Column::initial(g.widths[c]).at_least(48.0).clip(true));
+    for &w in &g.widths[..ncols] {
+        tb = tb.column(Column::initial(w).at_least(48.0).clip(true));
     }
     if let Some(r) = g.scroll_to.take() {
         if let Some(pos) = g.view_idx.iter().position(|&x| x == r) {
@@ -1409,9 +1406,7 @@ mod tests {
     }
 
     fn frame(ctx: &egui::Context, g: &mut GridState, events: Vec<Event>, t: f64) {
-        let mut input = RawInput::default();
-        input.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(900.0, 600.0)));
-        input.time = Some(t);
+        let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(900.0, 600.0))), time: Some(t), ..Default::default() };
         let mut evs = Vec::new();
         for e in events {
             if let Event::Key { modifiers, .. } | Event::PointerButton { modifiers, .. } = &e {
@@ -1536,7 +1531,7 @@ mod tests {
                 let more = wide_rows(g.qr.rows.len(), 200);
                 let added = more.len();
                 g.qr.rows.extend(more);
-                g.row_state.extend(std::iter::repeat(RowState::Clean).take(added));
+                g.row_state.extend(std::iter::repeat_n(RowState::Clean, added));
                 g.dirty = true;
             }
         }

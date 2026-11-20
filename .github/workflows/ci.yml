@@ -21,6 +21,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Testes
         run: cargo test --locked
@@ -28,3 +30,5 @@ jobs:
         run: cargo test --manifest-path vendor/tiberius/Cargo.toml --no-default-features --features tds73,rustls,legacy-openssl --lib legacy
       - name: Compilação
         run: cargo build --locked
+      - name: Clippy (sem avisos)
+        run: cargo clippy --locked --all-targets -- -D warnings
