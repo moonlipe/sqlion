@@ -37,6 +37,6 @@
 
 ## 6. Release e validação integrada
 
-- [ ] 6.1 Confirmar que o workflow de release compila os 5 alvos com o OpenSSL vendored (Perl/nmake no Windows, cross aarch64 Linux); ajustar `.github/workflows/release.yml` e `ci.yml` se faltar algo; verificar com `workflow_dispatch` verde nos 5 alvos
+- [x] 6.1 Confirmar que o workflow de release compila os 5 alvos com o OpenSSL vendored (Perl/nmake no Windows, cross aarch64 Linux); ajustar `.github/workflows/release.yml` e `ci.yml` se faltar algo; verificar com `workflow_dispatch` verde nos 5 alvos
 - [x] 6.2 Validar com o servidor do cliente: conexão em Automático conecta (teste informa "TLS legado"), consultas e cancelamento funcionam; validar também um SQL Server moderno em Automático usando TLS moderno sem segunda tentativa
 - [x] 6.3 Rodar `cargo test` e `cargo clippy` sem novos avisos e `openspec validate editor-highlight-assists-legacy-tls --strict`
