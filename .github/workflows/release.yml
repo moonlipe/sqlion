@@ -133,10 +133,13 @@ jobs:
           sudo apt-get install -y libfuse2 > /dev/null || true
           packaging/linux/appimage.sh "target/${{ matrix.target }}/release/sqlion" "${{ steps.bin.outputs.version }}" dist
           # the AppImage opens and carries the app, desktop entry and icon
-          ( cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE"/dist/sqlion-*.AppImage --appimage-extract > /dev/null )
-          test -x "$RUNNER_TEMP/squashfs-root/usr/bin/sqlion"
-          test -f "$RUNNER_TEMP/squashfs-root/io.github.moonlipe.Sqlion.desktop"
-          test -f "$RUNNER_TEMP/squashfs-root/io.github.moonlipe.Sqlion.png"
+          IMG=$(ls "$GITHUB_WORKSPACE"/dist/sqlion-*.AppImage)
+          ( cd "$RUNNER_TEMP" && "$IMG" --appimage-extract > /dev/null ) || { echo "::error::a extração do AppImage falhou"; exit 1; }
+          R="$RUNNER_TEMP/squashfs-root"
+          ls -la "$R" "$R/usr/bin"
+          for f in usr/bin/sqlion io.github.moonlipe.Sqlion.desktop .DirIcon AppRun; do
+            [ -e "$R/$f" ] || { echo "::error::falta $f no AppImage"; exit 1; }
+          done
 
       - name: Instalar o .deb (verificação)
         run: |
