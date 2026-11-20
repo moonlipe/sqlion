@@ -51,6 +51,12 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # tiberius compiles a static OpenSSL (openssl-src): it needs a Windows Perl, not the MSYS one that comes with Git
+      - name: Perl para o OpenSSL (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo 'OPENSSL_SRC_PERL=C:\Strawberry\perl\bin\perl.exe' >> "$GITHUB_ENV"
+
       - name: Compilar
         run: cargo build --release --locked --target ${{ matrix.target }}
 

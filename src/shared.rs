@@ -384,7 +384,11 @@ impl Shared {
         match Session::open(cfg) {
             Ok(mut s) => {
                 let v = s.version();
-                Ok(if s.legacy_auth { format!("{} — o servidor usa senha em formato antigo (pré-4.1); o app habilitou isso automaticamente", v) } else { v })
+                let v = if s.legacy_auth { format!("{} — o servidor usa senha em formato antigo (pré-4.1); o app habilitou isso automaticamente", v) } else { v };
+                Ok(match &s.conn {
+                    crate::db::Conn::Ms(m) => format!("{} — {}", v, m.tls().label()),
+                    _ => v,
+                })
             }
             Err(e) => Err(clean_err(e).to_string()),
         }

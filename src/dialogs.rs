@@ -181,6 +181,22 @@ impl App {
                         ui.label("Segurança");
                         ui.checkbox(&mut cfg.read_only, "Conexão somente leitura");
                         ui.end_row();
+                        if cfg.kind == Kind::SqlServer {
+                            ui.label("Criptografia");
+                            egui::ComboBox::from_id_salt("mssql_encryption").selected_text(cfg.mssql_encryption.label()).show_ui(ui, |ui| {
+                                for e in crate::db::MsEncryption::ALL {
+                                    ui.selectable_value(&mut cfg.mssql_encryption, e, e.label());
+                                }
+                            })
+                            .response
+                            .on_hover_text("Automático tenta TLS moderno e, se o servidor recusar, TLS legado (1.0+) para servidores antigos.");
+                            ui.end_row();
+                            if cfg.mssql_encryption == crate::db::MsEncryption::Off {
+                                ui.label("");
+                                ui.label(egui::RichText::new("Sem criptografia: o tráfego, inclusive o login, segue sem criptografia. Só funciona se o servidor não exigir criptografia.").small().color(egui::Color32::from_rgb(220, 150, 40)));
+                                ui.end_row();
+                            }
+                        }
                         ui.label("Aparência");
                         appearance_editor(ui, cfg);
                         ui.end_row();
@@ -907,7 +923,7 @@ impl App {
             Dialog::Prefs => {
                 let mut open = true;
                 let before = serde_json::to_string(&self.sh.store.prefs).unwrap_or_default();
-                win(ctx, "Preferências").open(&mut open).collapsible(false).show(ctx, |ui| {
+                win(ctx, "Preferências").open(&mut open).collapsible(false).vscroll(true).max_height(ctx.content_rect().height() * 0.85).show(ctx, |ui| {
                     let okc = crate::theme::pal(ui.visuals().dark_mode).ok;
                     crate::icons::chip(ui, Some(Icon::Save), "As configurações são salvas automaticamente", okc);
                     ui.label(egui::RichText::new(format!("Cada alteração é gravada na hora em {}", store::config_dir().join("workspace.json").display())).small().weak());
@@ -975,6 +991,8 @@ impl App {
                     });
                     ui.add_space(4.0);
                     ui.label(egui::RichText::new("Para versionar com git, aponte a pasta para dentro de um repositório (ou use Arquivo ▸ Versionar scripts). Scripts já salvos não são movidos ao trocar a pasta.").small().weak());
+                    ui.add_space(6.0);
+                    editor_prefs_ui(ui, p);
                 });
                 if serde_json::to_string(&self.sh.store.prefs).unwrap_or_default() != before {
                     self.sh.save();
@@ -1213,6 +1231,57 @@ const PALETTE: [[u8; 3]; 12] = [
     [90, 100, 120],
     [30, 34, 42],
 ];
+
+/// Sample shown in "Cores do editor": one piece of every category.
+const COLOR_SAMPLE: &str = "-- clientes ativos\nselect c.nome, \"Cidade\", \"Apelido\", convert(varchar(10), getdate(), 103)\nfrom clientes c\nwhere c.id = @id and c.arquivo like 'rel_${data}.csv' and c.limite > 100";
+
+/// "Editor" assists and "Cores do editor" (per theme) sections of the Preferences window.
+fn editor_prefs_ui(ui: &mut egui::Ui, p: &mut crate::store::Prefs) {
+    use crate::theme::SqlCat;
+    egui::CollapsingHeader::new(egui::RichText::new("Editor").strong()).default_open(true).show(ui, |ui| {
+        ui.checkbox(&mut p.ac_auto_popup, "Abrir sugestões automaticamente ao digitar").on_hover_text("Desligado, a lista só abre com Ctrl+Espaço.");
+        ui.checkbox(&mut p.ac_insert_single, "Inserir sozinha a única sugestão");
+        ui.checkbox(&mut p.auto_close_pairs, "Fechar aspas e parênteses automaticamente");
+        ui.checkbox(&mut p.hl_metadata, "Colorir tabelas e colunas pelos metadados");
+    });
+    let dark = p.dark;
+    egui::CollapsingHeader::new(egui::RichText::new(format!("Cores do editor (tema {})", if dark { "escuro" } else { "claro" })).strong()).show(ui, |ui| {
+        ui.label(egui::RichText::new("Cada tema guarda suas próprias cores. Troque o tema para personalizar o outro.").small().weak());
+        let defaults = crate::theme::default_sql_palette(dark);
+        let colors = if dark { &mut p.sql_colors_dark } else { &mut p.sql_colors_light };
+        egui::Grid::new("sql_colors_grid").num_columns(3).spacing([10.0, 4.0]).show(ui, |ui| {
+            for cat in SqlCat::ALL {
+                ui.label(cat.label());
+                let mut c = crate::theme::sql_palette(colors, dark).get(cat);
+                if egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::OnlyBlend).changed() {
+                    let [r, g, b, a] = c.to_srgba_unmultiplied();
+                    colors.insert(cat.key().to_string(), [r, g, b, a]);
+                }
+                if colors.contains_key(cat.key()) && c != defaults.get(cat) {
+                    if ui.small_button("↺").on_hover_text("Restaurar a cor padrão").clicked() {
+                        colors.remove(cat.key());
+                    }
+                } else {
+                    colors.remove(cat.key());
+                    ui.label("");
+                }
+                ui.end_row();
+            }
+        });
+        if ui.add_enabled(!colors.is_empty(), egui::Button::new("Restaurar padrão do tema")).clicked() {
+            colors.clear();
+        }
+        ui.add_space(4.0);
+        let pal = crate::theme::sql_palette(colors, dark);
+        let mut names = crate::tabs::HlNames::default();
+        names.tables.insert("clientes".into());
+        names.columns.extend(["nome", "cidade", "id", "arquivo", "limite"].map(String::from));
+        let job = crate::tabs::highlight(COLOR_SAMPLE, &pal, 13.0, f32::INFINITY, Some(&names));
+        egui::Frame::new().fill(crate::theme::pal(dark).editor).inner_margin(8.0).corner_radius(4.0).show(ui, |ui| {
+            ui.add(egui::Label::new(job).extend());
+        });
+    });
+}
 
 /// Colour, icon and label of the connection badge, with a live preview.
 fn appearance_editor(ui: &mut egui::Ui, cfg: &mut ConnConfig) {

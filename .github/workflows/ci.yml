@@ -24,5 +24,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Testes
         run: cargo test --locked
+      - name: TLS legado (tiberius vendored, handshake TLS 1.0/1.1 contra OpenSSL local)
+        run: cargo test --manifest-path vendor/tiberius/Cargo.toml --no-default-features --features tds73,rustls,legacy-openssl --lib legacy
       - name: Compilação
         run: cargo build --locked

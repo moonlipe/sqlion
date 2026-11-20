@@ -13,10 +13,85 @@ pub struct Ms {
     client: Client<Compat<tokio::net::TcpStream>>,
     /// set from another thread to abandon the running request
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    tls: MsTls,
+}
+
+/// TLS mode actually used by a SQL Server connection.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MsTls {
+    Modern,
+    Legacy,
+    Off,
+}
+
+impl MsTls {
+    pub fn label(self) -> &'static str {
+        match self {
+            MsTls::Modern => "TLS moderno",
+            MsTls::Legacy => "TLS legado (1.0+)",
+            MsTls::Off => "sem criptografia",
+        }
+    }
+}
+
+/// Modes tried, in order, for the connection setting.
+pub fn ms_attempts(enc: crate::db::MsEncryption) -> &'static [MsTls] {
+    use crate::db::MsEncryption as E;
+    match enc {
+        E::Auto => &[MsTls::Modern, MsTls::Legacy],
+        E::Modern => &[MsTls::Modern],
+        E::Legacy => &[MsTls::Legacy],
+        E::Off => &[MsTls::Off],
+    }
+}
+
+/// The server refused the TLS negotiation (old TLS versions or cipher suites): closed the connection in the
+/// middle of the handshake or answered it with an alert. Login, network and timeout errors are not.
+pub fn is_tls_handshake_error(e: &anyhow::Error) -> bool {
+    use std::io::ErrorKind as K;
+    match e.downcast_ref::<tiberius::error::Error>() {
+        Some(tiberius::error::Error::Tls(_)) => true,
+        Some(tiberius::error::Error::Io { kind, message }) => {
+            let m = message.to_lowercase();
+            matches!(kind, K::UnexpectedEof | K::ConnectionReset | K::ConnectionAborted) || m.contains("tls") || m.contains("handshake")
+        }
+        _ => false,
+    }
+}
+
+/// Message for a connection that failed in every mode tried: Portuguese text, the modes, what to try next and the
+/// original error as detail. Errors other than the TLS handshake are returned as they are.
+pub fn ms_connect_error(tried: &[MsTls], last: anyhow::Error) -> anyhow::Error {
+    if !is_tls_handshake_error(&last) {
+        return last;
+    }
+    let modes: Vec<&str> = tried.iter().map(|m| m.label()).collect();
+    let hint = if !tried.contains(&MsTls::Legacy) {
+        "Em Criptografia, escolha \"Legado (TLS 1.0+)\" (ou \"Automático\"), para servidores antigos."
+    } else {
+        "Se o servidor não exigir criptografia, escolha \"Sem criptografia\" em Criptografia."
+    };
+    anyhow!("O servidor recusou a negociação TLS (tentado: {}). {}\nDetalhe: {}", modes.join(" e "), hint, last)
 }
 
 impl Ms {
+    /// Connects with the TLS of the connection setting; in Auto a handshake refused with modern TLS is tried again,
+    /// on a new TCP connection, in legacy mode.
     pub fn connect(cfg: &ConnConfig, pass: &str) -> Result<Ms> {
+        let attempts = ms_attempts(cfg.mssql_encryption);
+        let mut tried = Vec::new();
+        for (i, &mode) in attempts.iter().enumerate() {
+            tried.push(mode);
+            match Self::connect_with(cfg, pass, mode) {
+                Ok(ms) => return Ok(ms),
+                Err(e) if i + 1 < attempts.len() && is_tls_handshake_error(&e) => continue,
+                Err(e) => return Err(ms_connect_error(&tried, e)),
+            }
+        }
+        unreachable!("at least one TLS mode is tried")
+    }
+
+    fn connect_with(cfg: &ConnConfig, pass: &str, mode: MsTls) -> Result<Ms> {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
         let mut c = Config::new();
         c.host(&cfg.host);
@@ -26,6 +101,12 @@ impl Ms {
             c.database(&cfg.database);
         }
         c.trust_cert();
+        match mode {
+            MsTls::Modern => {}
+            MsTls::Legacy => c.legacy_tls(true),
+            // EncryptionLevel::Off still negotiates TLS for the login: NotSupported is no TLS at all
+            MsTls::Off => c.encryption(tiberius::EncryptionLevel::NotSupported),
+        }
         c.application_name("Sqlion");
         let secs = crate::constants::CONNECT_TIMEOUT_SECS;
         let client = rt.block_on(async {
@@ -36,7 +117,11 @@ impl Ms {
             let cl = Client::connect(c, tcp.compat_write()).await?;
             Ok::<_, anyhow::Error>(cl)
         })?;
-        Ok(Ms { rt, client, cancel: Default::default() })
+        Ok(Ms { rt, client, cancel: Default::default(), tls: mode })
+    }
+
+    pub fn tls(&self) -> MsTls {
+        self.tls
     }
 
     pub fn cancel_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
@@ -874,5 +959,48 @@ mod tests {
         assert_eq!(mongo_value(&Some("abc".into()), false), "\"abc\"");
         assert_eq!(mongo_value(&None, false), "null");
         assert_eq!(mongo_value(&Some("65f1a2b3c4d5e6f708192a3b".into()), true), "{\"$oid\":\"65f1a2b3c4d5e6f708192a3b\"}");
+    }
+}
+
+#[cfg(test)]
+mod ms_tls_tests {
+    use super::*;
+    use crate::db::MsEncryption;
+
+    fn io(kind: std::io::ErrorKind, m: &str) -> anyhow::Error {
+        anyhow::Error::from(tiberius::error::Error::Io { kind, message: m.into() })
+    }
+
+    #[test]
+    fn old_connections_load_as_auto() {
+        let mut v = serde_json::to_value(ConnConfig::new(crate::db::Kind::SqlServer)).unwrap();
+        v.as_object_mut().unwrap().remove("mssql_encryption");
+        let c: ConnConfig = serde_json::from_value(v).unwrap();
+        assert_eq!(c.mssql_encryption, MsEncryption::Auto);
+        assert_eq!(ms_attempts(MsEncryption::Auto), &[MsTls::Modern, MsTls::Legacy]);
+        assert_eq!(ms_attempts(MsEncryption::Off), &[MsTls::Off]);
+    }
+
+    #[test]
+    fn handshake_errors_versus_others() {
+        use std::io::ErrorKind as K;
+        assert!(is_tls_handshake_error(&io(K::UnexpectedEof, "tls handshake eof")));
+        assert!(is_tls_handshake_error(&io(K::ConnectionReset, "Connection reset by peer (os error 104)")));
+        assert!(is_tls_handshake_error(&anyhow::Error::from(tiberius::error::Error::Tls("alert handshake failure".into()))));
+        // login, network, timeout
+        assert!(!is_tls_handshake_error(&anyhow::Error::from(tiberius::error::Error::Protocol("Login failed for user 'sa'.".into()))));
+        assert!(!is_tls_handshake_error(&io(K::ConnectionRefused, "Connection refused")));
+        assert!(!is_tls_handshake_error(&anyhow!("Tempo esgotado ao conectar em srv:1433")));
+    }
+
+    #[test]
+    fn handshake_messages() {
+        let e = ms_connect_error(&[MsTls::Modern], io(std::io::ErrorKind::UnexpectedEof, "tls handshake eof")).to_string();
+        assert!(e.contains("recusou a negociação TLS") && e.contains("TLS moderno") && e.contains("Legado (TLS 1.0+)"), "{e}");
+        assert!(e.contains("tls handshake eof"));
+        let e = ms_connect_error(&[MsTls::Modern, MsTls::Legacy], io(std::io::ErrorKind::UnexpectedEof, "tls handshake eof")).to_string();
+        assert!(e.contains("TLS moderno e TLS legado (1.0+)") && e.contains("Sem criptografia") && e.contains("tls handshake eof"), "{e}");
+        let e = ms_connect_error(&[MsTls::Modern], anyhow!("Tempo esgotado")).to_string();
+        assert_eq!(e, "Tempo esgotado");
     }
 }

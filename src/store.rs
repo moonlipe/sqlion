@@ -57,6 +57,22 @@ pub struct Prefs {
     pub scripts_dir: String,
     /// reopen the tabs of the last session (kept in `session.json`)
     pub restore_tabs: bool,
+    /// editor assists (defaults: constants::AUTOCOMPLETE_AUTO_ACTIVATION, AUTOCOMPLETE_INSERT_SINGLE, AUTO_CLOSE_PAIRS)
+    pub ac_auto_popup: bool,
+    pub ac_insert_single: bool,
+    pub auto_close_pairs: bool,
+    /// colour tables and columns from the connection metadata
+    pub hl_metadata: bool,
+    /// editor colours chosen by the user per theme: category key (theme::SqlCat::key) -> RGBA; only what was changed
+    pub sql_colors_dark: std::collections::BTreeMap<String, [u8; 4]>,
+    pub sql_colors_light: std::collections::BTreeMap<String, [u8; 4]>,
+}
+
+impl Prefs {
+    /// colours of the SQL editor for the theme
+    pub fn sql_palette(&self, dark: bool) -> crate::theme::SqlPalette {
+        crate::theme::sql_palette(if dark { &self.sql_colors_dark } else { &self.sql_colors_light }, dark)
+    }
 }
 
 impl Default for Prefs {
@@ -79,6 +95,12 @@ impl Default for Prefs {
             null_text: crate::constants::NULL_LABEL.into(),
             scripts_dir: String::new(),
             restore_tabs: true,
+            ac_auto_popup: crate::constants::AUTOCOMPLETE_AUTO_ACTIVATION,
+            ac_insert_single: crate::constants::AUTOCOMPLETE_INSERT_SINGLE,
+            auto_close_pairs: crate::constants::AUTO_CLOSE_PAIRS,
+            hl_metadata: true,
+            sql_colors_dark: Default::default(),
+            sql_colors_light: Default::default(),
         }
     }
 }
@@ -671,6 +693,22 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editor_prefs_default_on_for_old_files_and_round_trip() {
+        let p: Prefs = serde_json::from_str(r#"{"dark": true, "font_size": 13.0}"#).unwrap();
+        assert!(p.ac_auto_popup && p.ac_insert_single && p.auto_close_pairs && p.hl_metadata);
+        assert!(p.sql_colors_dark.is_empty() && p.sql_colors_light.is_empty());
+        assert_eq!(p.sql_palette(true), crate::theme::default_sql_palette(true));
+        let mut q = p.clone();
+        q.ac_auto_popup = false;
+        q.hl_metadata = false;
+        q.sql_colors_dark.insert("table".into(), [0, 255, 0, 255]);
+        let r: Prefs = serde_json::from_str(&serde_json::to_string(&q).unwrap()).unwrap();
+        assert!(!r.ac_auto_popup && !r.hl_metadata && r.ac_insert_single);
+        assert_eq!(r.sql_palette(true).get(crate::theme::SqlCat::Table), egui::Color32::from_rgb(0, 255, 0));
+        assert_eq!(r.sql_palette(false), crate::theme::default_sql_palette(false), "the light theme is untouched");
+    }
     use crate::db::Kind;
 
     fn tmp(name: &str) -> PathBuf {

@@ -11,11 +11,67 @@ pub const KEYWORDS: &[&str] = &[
     "RETURNING", "TRUNCATE", "GRANT", "REVOKE", "PRAGMA", "SHOW", "DESCRIBE", "USE", "DATABASE", "SCHEMA", "IF", "REPLACE", "CAST", "COALESCE",
     "EXCEPT", "INTERSECT", "OVER", "PARTITION", "AUTOINCREMENT", "AUTO_INCREMENT", "SERIAL", "TRUE", "FALSE", "CASCADE", "RESTRICT", "TEMP",
     "TEMPORARY", "VACUUM", "ATTACH", "DETACH", "NATURAL", "ESCAPE", "ANY", "SOME", "FETCH", "FIRST", "ROWS", "ONLY", "WINDOW", "LATERAL",
+    // procedural / T-SQL / PL/pgSQL / MySQL statements and control flow
+    "EXEC", "EXECUTE", "DECLARE", "DEALLOCATE", "PREPARE", "OPEN", "CLOSE", "CURSOR", "FOR", "NEXT", "PRIOR", "LAST", "ABSOLUTE", "RELATIVE",
+    "PRINT", "RAISERROR", "THROW", "TRY", "CATCH", "WHILE", "BREAK", "CONTINUE", "RETURN", "RETURNS", "GOTO", "GO", "WAITFOR", "DELAY", "MERGE",
+    "MATCHED", "OUTPUT", "TOP", "PERCENT", "TIES", "NOLOCK", "READPAST", "UPDLOCK", "HOLDLOCK", "ROWLOCK", "TABLOCK", "NOWAIT", "OPTION",
+    "RECOMPILE", "MAXDOP", "PIVOT", "UNPIVOT", "APPLY", "IDENTITY", "IDENTITY_INSERT", "NOCOUNT", "XACT_ABORT", "ANSI_NULLS",
+    "QUOTED_IDENTIFIER", "ISOLATION", "LEVEL", "READ", "WRITE", "COMMITTED", "UNCOMMITTED", "REPEATABLE", "SERIALIZABLE", "SNAPSHOT", "TRAN",
+    "SAVE", "SAVEPOINT", "RELEASE", "WORK", "START", "OF", "TO", "DO", "LOOP", "REPEAT", "UNTIL", "LEAVE", "ITERATE", "ELSIF", "ELSEIF",
+    "EXCEPTION", "RAISE", "NOTICE", "PERFORM", "LANGUAGE", "PLPGSQL", "VOLATILE", "STABLE", "IMMUTABLE", "SECURITY", "DEFINER", "INVOKER",
+    "DELIMITER", "CALL", "HANDLER", "SIGNAL", "SQLSTATE", "CONDITION", "LOCK", "UNLOCK", "TABLES", "SHARE", "MODE", "EXCLUSIVE", "NULLS",
+    "CLUSTERED", "NONCLUSTERED", "INCLUDE", "FILLFACTOR", "STATISTICS", "COLLATE", "ENABLE", "DISABLE", "SEQUENCE", "SYNONYM",
+    "TYPE", "DOMAIN", "EXTENSION", "OWNER", "RENAME", "MODIFY", "CHANGE", "AFTER", "BEFORE", "INSTEAD", "EACH", "ROW", "STATEMENT",
+    "INHERITS", "MATERIALIZED", "REFRESH", "CONCURRENTLY", "DEFERRABLE", "INITIALLY", "DEFERRED", "IMMEDIATE", "VALIDATE", "OUT", "INOUT",
+    "VARIADIC", "SETOF", "TABLESAMPLE", "FILTER", "WITHIN", "RANGE", "UNBOUNDED", "PRECEDING", "FOLLOWING", "CURRENT", "EXPLICIT", "IGNORE",
+    "DUPLICATE", "STRAIGHT_JOIN", "SQL_CALC_FOUND_ROWS", "HIGH_PRIORITY", "LOW_PRIORITY", "DELAYED", "ENGINE", "CHARSET", "UNSIGNED",
+    "ZEROFILL", "ROWGUIDCOL", "PERSISTED", "SPARSE", "FILESTREAM", "KILL", "BACKUP", "RESTORE", "DBCC", "CHECKPOINT", "RECONFIGURE",
+    "REVERT", "DENY", "LOGIN", "USER", "ROLE", "SYSTEM_USER", "SESSION_USER", "CURRENT_USER", "CURRENT_DATE", "CURRENT_TIME",
+    "CURRENT_TIMESTAMP", "LOCALTIME", "LOCALTIMESTAMP", "OFF",
+    // data types
+    "BIGINT", "SMALLINT", "TINYINT", "MEDIUMINT", "BIT", "MONEY", "SMALLMONEY", "NCHAR", "NVARCHAR", "NTEXT", "VARBINARY", "BINARY",
+    "IMAGE", "DATETIME", "DATETIME2", "SMALLDATETIME", "DATETIMEOFFSET", "UNIQUEIDENTIFIER", "XML", "SQL_VARIANT", "HIERARCHYID",
+    "GEOGRAPHY", "GEOMETRY", "ROWVERSION", "SYSNAME", "BOOL", "VARYING", "PRECISION", "INTERVAL", "TIMESTAMPTZ", "TIMETZ", "ZONE",
+    "BYTEA", "UUID", "JSON", "JSONB", "INET", "CIDR", "MACADDR", "SMALLSERIAL", "BIGSERIAL", "ARRAY", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT",
+    "TINYBLOB", "MEDIUMBLOB", "LONGBLOB", "ENUM", "YEAR", "MAX_ROWS", "CLOB", "NUMBER", "VARCHAR2", "NVARCHAR2",
 ];
 
+/// Built-in functions (SQL standard, SQL Server, PostgreSQL, MySQL, SQLite). Names that are also keywords
+/// (`LEFT`, `REPLACE`, `COUNT`...) count as functions only when followed by `(`.
+pub const FUNCTIONS: &[&str] = &[
+    "COUNT", "SUM", "AVG", "MIN", "MAX", "CAST", "COALESCE", "LEFT", "RIGHT", "REPLACE", "CONVERT", "TRY_CONVERT", "TRY_CAST", "PARSE",
+    "TRY_PARSE", "ISNULL", "NULLIF", "IFNULL", "NVL", "IIF", "CHOOSE", "GETDATE", "GETUTCDATE", "SYSDATETIME", "SYSUTCDATETIME",
+    "SYSDATETIMEOFFSET", "DATEADD", "DATEDIFF", "DATEDIFF_BIG", "DATEPART", "DATENAME", "DATEFROMPARTS", "EOMONTH", "DAY", "MONTH",
+    "YEAR", "ISDATE", "ISNUMERIC", "SUBSTRING", "SUBSTR", "LEN", "LENGTH", "CHAR_LENGTH", "CHARACTER_LENGTH", "DATALENGTH", "UPPER", "LOWER",
+    "UCASE", "LCASE", "TRIM", "LTRIM", "RTRIM", "BTRIM", "CHARINDEX", "PATINDEX", "STUFF", "REPLICATE", "REVERSE", "SPACE", "STR",
+    "CONCAT", "CONCAT_WS", "FORMAT", "QUOTENAME", "STRING_AGG", "STRING_SPLIT", "TRANSLATE", "SOUNDEX", "DIFFERENCE", "ASCII", "UNICODE",
+    "NCHAR", "INSTR", "LOCATE", "POSITION", "LPAD", "RPAD", "SPLIT_PART", "REGEXP_REPLACE", "REGEXP_MATCHES", "REGEXP_LIKE",
+    "GROUP_CONCAT", "ARRAY_AGG", "JSON_AGG", "JSONB_AGG", "JSON_BUILD_OBJECT", "JSON_OBJECT", "JSON_VALUE", "JSON_QUERY", "JSON_EXTRACT",
+    "OPENJSON", "ISJSON", "ROUND", "CEILING", "CEIL", "FLOOR", "ABS", "SIGN", "POWER", "POW", "SQRT", "SQUARE", "EXP", "LOG", "LOG10",
+    "LN", "MOD", "PI", "RAND", "RANDOM", "NEWID", "NEWSEQUENTIALID", "GEN_RANDOM_UUID", "ROW_NUMBER", "RANK", "DENSE_RANK", "NTILE",
+    "LAG", "LEAD", "FIRST_VALUE", "LAST_VALUE", "PERCENT_RANK", "CUME_DIST", "STDEV", "STDEVP", "VAR", "VARP", "STDDEV", "VARIANCE",
+    "COUNT_BIG", "CHECKSUM", "BINARY_CHECKSUM", "HASHBYTES", "MD5", "SHA1", "SHA2", "NOW", "CURDATE", "CURTIME", "SYSDATE",
+    "UTC_TIMESTAMP", "DATE_FORMAT", "DATE_ADD", "DATE_SUB", "DATE_TRUNC", "DATE_PART", "EXTRACT", "AGE", "TO_CHAR", "TO_DATE",
+    "TO_NUMBER", "TO_TIMESTAMP", "STRFTIME", "JULIANDAY", "UNIXEPOCH", "STR_TO_DATE", "FROM_UNIXTIME", "UNIX_TIMESTAMP", "OBJECT_ID",
+    "OBJECT_NAME", "DB_NAME", "DB_ID", "SCHEMA_NAME", "USER_NAME", "SUSER_SNAME", "HOST_NAME", "APP_NAME", "SCOPE_IDENTITY",
+    "IDENT_CURRENT", "ERROR_MESSAGE", "ERROR_NUMBER", "ERROR_LINE", "ERROR_SEVERITY", "ERROR_STATE", "ERROR_PROCEDURE", "XACT_STATE",
+    "COL_NAME", "COLUMNPROPERTY", "OBJECTPROPERTY", "SERVERPROPERTY", "GREATEST", "LEAST", "GENERATE_SERIES", "UNNEST", "NEXTVAL",
+    "CURRVAL", "SETVAL", "LAST_INSERT_ID", "LAST_INSERT_ROWID", "CHANGES", "TYPEOF", "PRINTF", "HEX", "UNHEX", "ZEROBLOB", "QUOTE",
+    "OPENQUERY", "OPENROWSET", "CONTAINS", "FREETEXT",
+];
+
+fn word_set(list: &'static [&'static str]) -> HashSet<&'static str> {
+    list.iter().copied().collect()
+}
+
 pub fn is_keyword(w: &str) -> bool {
-    let u = w.to_uppercase();
-    KEYWORDS.iter().any(|k| *k == u)
+    static SET: std::sync::OnceLock<HashSet<&'static str>> = std::sync::OnceLock::new();
+    SET.get_or_init(|| word_set(KEYWORDS)).contains(w.to_uppercase().as_str())
+}
+
+pub fn is_function(w: &str) -> bool {
+    static SET: std::sync::OnceLock<HashSet<&'static str>> = std::sync::OnceLock::new();
+    SET.get_or_init(|| word_set(FUNCTIONS)).contains(w.to_uppercase().as_str())
 }
 
 pub fn first_word(sql: &str) -> String {
@@ -41,7 +97,14 @@ pub enum Tok {
     Ident,
     Op,
     Space,
+    /// `:name` placeholder
     Param,
+    /// built-in function name
+    Function,
+    /// `@name`, `@@name` or `${name}`
+    Variable,
+    /// `"..."` or `` `...` ``
+    QuotedIdent,
 }
 
 /// Length of a dollar-quote opening tag such as `$$` or `$body$` at the start of `b`.
@@ -58,6 +121,98 @@ fn dollar_tag_len(b: &[u8]) -> Option<usize> {
     } else {
         None
     }
+}
+
+/// Length of a `${name}` variable at the start of `b` (same rule as [`find_vars`]).
+fn template_var_len(b: &[u8]) -> Option<usize> {
+    if !b.starts_with(b"${") {
+        return None;
+    }
+    let j = b[2..].iter().position(|&c| c == b'}')?;
+    let name = &b[2..2 + j];
+    let ok = !name.iter().all(|c| c.is_ascii_whitespace()) && !name.iter().any(|&c| c == b'\n' || c == b'$' || c == b'{');
+    ok.then_some(j + 3)
+}
+
+fn next_is_paren(b: &[u8]) -> bool {
+    b.iter().find(|c| !c.is_ascii_whitespace()) == Some(&b'(')
+}
+
+/// Splits a string token into string and `${name}` variable pieces, for highlighting only: everywhere else the
+/// string stays one token. Returns (is_variable, byte range) relative to `s`.
+pub fn str_var_spans(s: &str, a: usize, b: usize) -> Vec<(bool, usize, usize)> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    let (mut i, mut last) = (a, a);
+    while i < b {
+        match template_var_len(&bytes[i..b]) {
+            Some(l) => {
+                if i > last {
+                    out.push((false, last, i));
+                }
+                out.push((true, i, i + l));
+                i += l;
+                last = i;
+            }
+            None => i += 1,
+        }
+    }
+    if last < b {
+        out.push((false, last, b));
+    }
+    out
+}
+
+/// Column aliases defined in the select lists of `s` (lower case, without quotes): `expr AS name`, `expr name`,
+/// `CASE ... END name` and T-SQL `name = expr`. Subqueries are followed; table aliases are not included.
+pub fn column_aliases(s: &str, toks: &[(Tok, usize, usize)]) -> HashSet<String> {
+    let sig: Vec<(Tok, &str)> = toks.iter().filter(|(k, _, _)| !matches!(k, Tok::Space | Tok::Comment)).map(|(k, a, b)| (*k, &s[*a..*b])).collect();
+    let name = |t: &str| t.trim_matches(|c| c == '"' || c == '`').to_lowercase();
+    let mut out = HashSet::new();
+    let mut depth = 0i32;
+    // paren depth of each open select list
+    let mut selects: Vec<i32> = Vec::new();
+    for i in 0..sig.len() {
+        let (k, t) = sig[i];
+        match t {
+            "(" => depth += 1,
+            ")" => {
+                depth -= 1;
+                while selects.last().is_some_and(|d| *d > depth) {
+                    selects.pop();
+                }
+            }
+            _ => {}
+        }
+        if k == Tok::Keyword {
+            let u = t.to_uppercase();
+            if u == "SELECT" {
+                selects.push(depth);
+            } else if matches!(u.as_str(), "FROM" | "INTO" | "WHERE" | "UNION" | "EXCEPT" | "INTERSECT" | "GROUP" | "ORDER" | "HAVING" | "LIMIT") && selects.last() == Some(&depth) {
+                selects.pop();
+            }
+        }
+        if selects.last() != Some(&depth) || !matches!(k, Tok::Ident | Tok::QuotedIdent) {
+            continue;
+        }
+        let prev = i.checked_sub(1).map(|j| sig[j]);
+        let next = sig.get(i + 1).map(|x| x.1);
+        if matches!(next, Some(".") | Some("(")) {
+            continue;
+        }
+        let alias = match prev {
+            Some((Tok::Keyword, p)) if p.eq_ignore_ascii_case("as") || p.eq_ignore_ascii_case("end") => true,
+            // `expr name`: the previous token ends an expression and is not part of a qualified name
+            Some((pk, p)) if matches!(pk, Tok::Ident | Tok::QuotedIdent | Tok::Number | Tok::Str | Tok::Variable | Tok::Param) || p == ")" => true,
+            // T-SQL `name = expr` at the start of a select item
+            Some((Tok::Keyword, p)) | Some((Tok::Op, p)) if (p.eq_ignore_ascii_case("select") || p.eq_ignore_ascii_case("distinct") || p == ",") && next == Some("=") => true,
+            _ => false,
+        };
+        if alias {
+            out.insert(name(t));
+        }
+    }
+    out
 }
 
 /// Tokenise into (kind, byte range).
@@ -107,7 +262,7 @@ pub fn tokenize(s: &str) -> Vec<(Tok, usize, usize)> {
                 i += 1;
             }
             i = (i + 1).min(n);
-            kind = Tok::Ident;
+            kind = Tok::QuotedIdent;
         } else if c == b'$' && dollar_tag_len(&b[i..]).is_some() {
             let tl = dollar_tag_len(&b[i..]).unwrap();
             let tag = &s[i..i + tl];
@@ -116,6 +271,15 @@ pub fn tokenize(s: &str) -> Vec<(Tok, usize, usize)> {
                 None => i = n,
             }
             kind = Tok::Str;
+        } else if let Some(l) = template_var_len(&b[i..]) {
+            i += l;
+            kind = Tok::Variable;
+        } else if c == b'@' && i + 1 < n && (b[i + 1].is_ascii_alphanumeric() || b[i + 1] == b'_' || b[i + 1] == b'@' || b[i + 1] >= 0x80) {
+            i += if b[i + 1] == b'@' { 2 } else { 1 };
+            while i < n && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'#' || b[i] == b'$' || b[i] >= 0x80) {
+                i += 1;
+            }
+            kind = Tok::Variable;
         } else if c.is_ascii_digit() {
             while i < n && (b[i].is_ascii_digit() || b[i] == b'.') {
                 i += 1;
@@ -131,7 +295,14 @@ pub fn tokenize(s: &str) -> Vec<(Tok, usize, usize)> {
             while i < n && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] >= 0x80) {
                 i += 1;
             }
-            kind = if is_keyword(&s[st..i]) { Tok::Keyword } else { Tok::Ident };
+            let w = &s[st..i];
+            kind = if is_function(w) && (!is_keyword(w) || next_is_paren(&b[i..])) {
+                Tok::Function
+            } else if is_keyword(w) {
+                Tok::Keyword
+            } else {
+                Tok::Ident
+            };
         } else {
             // advance one full char
             i += 1;
@@ -199,9 +370,10 @@ pub fn split_statements(s: &str, delim: &str) -> Vec<(usize, usize)> {
         }
         if first_tok {
             first_tok = false;
-            ctl = t == "@";
+            // `@set`, `@echo`... (control commands) start with `@`, which the tokenizer reads as a variable
+            ctl = t == "@" || (k == Tok::Variable && t.starts_with('@') && !t.starts_with("@@"));
         }
-        if first_kw.is_none() && (k == Tok::Keyword || k == Tok::Ident) {
+        if first_kw.is_none() && matches!(k, Tok::Keyword | Tok::Ident | Tok::Function) {
             first_kw = Some(t.to_uppercase());
             starts_create = t.eq_ignore_ascii_case("create");
         }
@@ -387,7 +559,8 @@ pub fn format_sql(s: &str, upper: bool) -> String {
             }
             Tok::Comment => toks.push(T { text: text.to_string(), kind: K::Comment, ws }),
             Tok::Keyword => toks.push(T { text: text.to_string(), kind: K::Kw, ws }),
-            Tok::Ident | Tok::Param => toks.push(T { text: text.to_string(), kind: K::Name, ws }),
+            Tok::Function if is_keyword(text) => toks.push(T { text: text.to_string(), kind: K::Kw, ws }),
+            Tok::Ident | Tok::Param | Tok::Function | Tok::Variable | Tok::QuotedIdent => toks.push(T { text: text.to_string(), kind: K::Name, ws }),
             Tok::Str | Tok::Number => toks.push(T { text: text.to_string(), kind: K::Value, ws }),
             Tok::Op => toks.push(T { text: text.to_string(), kind: K::Sym, ws }),
         }
@@ -688,7 +861,7 @@ pub fn referenced_tables(sql: &str) -> Vec<(String, String)> {
 pub fn auto_upper(text: &str, default_upper: bool) -> bool {
     let (mut up, mut low) = (0, 0);
     for (k, a, b) in tokenize(text) {
-        if k == Tok::Keyword {
+        if k == Tok::Keyword || (k == Tok::Function && is_keyword(&text[a..b])) {
             let w = &text[a..b];
             if w.chars().all(|c| !c.is_lowercase()) {
                 up += 1;
@@ -709,6 +882,87 @@ pub fn auto_upper(text: &str, default_upper: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn kinds(s: &str) -> Vec<(Tok, String)> {
+        tokenize(s).into_iter().filter(|(k, _, _)| *k != Tok::Space).map(|(k, a, b)| (k, s[a..b].to_string())).collect()
+    }
+    fn kind_of(s: &str, word: &str) -> Vec<Tok> {
+        kinds(s).into_iter().filter(|(_, t)| t == word).map(|(k, _)| k).collect()
+    }
+
+    #[test]
+    fn keyword_lists_have_no_duplicates() {
+        for list in [KEYWORDS, FUNCTIONS] {
+            let set: HashSet<_> = list.iter().collect();
+            assert_eq!(set.len(), list.len());
+        }
+    }
+
+    #[test]
+    fn tsql_statements_are_keywords() {
+        let s = "declare @id int; exec sp_who; deallocate cur";
+        for w in ["declare", "int", "exec", "deallocate"] {
+            assert_eq!(kind_of(s, w), vec![Tok::Keyword], "{w}");
+        }
+        assert_eq!(kind_of("nvarchar(10)", "nvarchar"), vec![Tok::Keyword]);
+        assert_eq!(kind_of("select execucao_id from t", "execucao_id"), vec![Tok::Ident]);
+    }
+
+    #[test]
+    fn functions_versus_keywords() {
+        let s = "select convert(varchar(10), getdate(), 103)";
+        assert_eq!(kind_of(s, "convert"), vec![Tok::Function]);
+        assert_eq!(kind_of(s, "getdate"), vec![Tok::Function]);
+        assert_eq!(kind_of(s, "select"), vec![Tok::Keyword]);
+        assert_eq!(kind_of(s, "varchar"), vec![Tok::Keyword]);
+        let s = "left join t on left (t.a, 2) = 'x'";
+        assert_eq!(kind_of(s, "left"), vec![Tok::Keyword, Tok::Function]);
+        assert_eq!(kind_of("select getdate", "getdate"), vec![Tok::Function]);
+    }
+
+    #[test]
+    fn variables() {
+        let s = "set @total = @@ROWCOUNT where id = ${id} and m = 'a@b.com'";
+        assert_eq!(kind_of(s, "@total"), vec![Tok::Variable]);
+        assert_eq!(kind_of(s, "@@ROWCOUNT"), vec![Tok::Variable]);
+        assert_eq!(kind_of(s, "${id}"), vec![Tok::Variable]);
+        assert_eq!(kind_of(s, "'a@b.com'"), vec![Tok::Str]);
+        assert_eq!(kind_of("a = :p", ":p"), vec![Tok::Param]);
+        assert_eq!(kind_of(r#"select "Nome Completo" from t"#, "\"Nome Completo\""), vec![Tok::QuotedIdent]);
+    }
+
+    #[test]
+    fn column_aliases_of_select_lists() {
+        let a = |s: &str| {
+            let mut v: Vec<String> = column_aliases(s, &tokenize(s)).into_iter().collect();
+            v.sort();
+            v
+        };
+        assert_eq!(a("select c.nome as cliente, count(*) qtd, case when x then 1 end flag from clientes c order by qtd"), vec!["cliente", "flag", "qtd"]);
+        assert_eq!(a(r#"select total = sum(v), "Valor Bruto" = v, v as "Líquido" from t"#), vec!["líquido", "total", "valor bruto"]);
+        // table aliases, qualified names and keywords are not column aliases
+        assert_eq!(a("select distinct c.nome from clientes c join pedidos p on p.cli = c.id"), Vec::<String>::new());
+        // subqueries
+        assert_eq!(a("select x.n from (select nome n from t) x where x.n in (select id as k from u)"), vec!["k", "n"]);
+        assert_eq!(a("with q as (select 1 um) select um from q"), vec!["um"]);
+    }
+
+    #[test]
+    fn template_variables_inside_strings() {
+        let s = "'arquivo_${data}.csv'";
+        let parts: Vec<(bool, &str)> = str_var_spans(s, 0, s.len()).into_iter().map(|(v, a, b)| (v, &s[a..b])).collect();
+        assert_eq!(parts, vec![(false, "'arquivo_"), (true, "${data}"), (false, ".csv'")]);
+        let s = r#"'{"a": 1}'"#;
+        assert_eq!(str_var_spans(s, 0, s.len()), vec![(false, 0, s.len())]);
+        assert_eq!(kinds(s).len(), 1);
+    }
+
+    #[test]
+    fn control_commands_still_end_at_line_end() {
+        let s = "@set x = 1\nselect ${x}";
+        let v: Vec<&str> = split_statements(s, ";").into_iter().map(|(a, b)| s[a..b].trim()).collect();
+        assert_eq!(v, vec!["@set x = 1", "select ${x}"]);
+    }
 
     #[test]
     fn splits_on_semicolon_and_blank_line() {

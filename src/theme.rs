@@ -171,3 +171,162 @@ fn first_font(paths: &[&str]) -> Option<(String, Vec<u8>)> {
     }
     None
 }
+
+// ---------------------------------------------------------------- SQL editor colours
+/// Categories of the SQL editor highlighting, each with its own colour per theme.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SqlCat {
+    Keyword,
+    Function,
+    Variable,
+    VariableBg,
+    Str,
+    Quoted,
+    QuotedKnown,
+    Number,
+    Comment,
+    Table,
+    Column,
+    Text,
+}
+
+impl SqlCat {
+    pub const ALL: [SqlCat; 12] = [
+        SqlCat::Keyword,
+        SqlCat::Function,
+        SqlCat::Variable,
+        SqlCat::VariableBg,
+        SqlCat::Str,
+        SqlCat::Quoted,
+        SqlCat::QuotedKnown,
+        SqlCat::Number,
+        SqlCat::Comment,
+        SqlCat::Table,
+        SqlCat::Column,
+        SqlCat::Text,
+    ];
+
+    /// stable name used as the key of the saved colours
+    pub fn key(self) -> &'static str {
+        match self {
+            SqlCat::Keyword => "keyword",
+            SqlCat::Function => "function",
+            SqlCat::Variable => "variable",
+            SqlCat::VariableBg => "variable_bg",
+            SqlCat::Str => "string",
+            SqlCat::Quoted => "quoted",
+            SqlCat::QuotedKnown => "quoted_known",
+            SqlCat::Number => "number",
+            SqlCat::Comment => "comment",
+            SqlCat::Table => "table",
+            SqlCat::Column => "column",
+            SqlCat::Text => "text",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SqlCat::Keyword => "Palavra-chave",
+            SqlCat::Function => "Função",
+            SqlCat::Variable => "Variável / parâmetro",
+            SqlCat::VariableBg => "Fundo de variável em string",
+            SqlCat::Str => "String 'aspas simples'",
+            SqlCat::Quoted => "\"Aspas duplas\"",
+            SqlCat::QuotedKnown => "\"Tabela ou coluna\" entre aspas",
+            SqlCat::Number => "Número",
+            SqlCat::Comment => "Comentário",
+            SqlCat::Table => "Tabela / view",
+            SqlCat::Column => "Coluna",
+            SqlCat::Text => "Texto comum",
+        }
+    }
+}
+
+/// Colours of the SQL editor, indexed by [`SqlCat`].
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct SqlPalette(pub [Color32; 12]);
+
+impl SqlPalette {
+    pub fn get(&self, c: SqlCat) -> Color32 {
+        self.0[c as usize]
+    }
+}
+
+pub fn default_sql_palette(dark: bool) -> SqlPalette {
+    let c = |r, g, b| Color32::from_rgb(r, g, b);
+    let a = |r, g, b, a| Color32::from_rgba_unmultiplied(r, g, b, a);
+    // same order as SqlCat::ALL
+    SqlPalette(if dark {
+        [
+            c(86, 156, 214),
+            c(220, 220, 170),
+            c(255, 121, 198),
+            a(255, 121, 198, 40),
+            c(206, 145, 120),
+            c(240, 170, 60),
+            c(90, 190, 235),
+            c(181, 206, 168),
+            c(106, 153, 85),
+            c(184, 160, 214),
+            c(80, 200, 195),
+            c(212, 212, 212),
+        ]
+    } else {
+        [
+            c(0, 0, 192),
+            c(121, 94, 38),
+            c(190, 0, 120),
+            a(190, 0, 120, 30),
+            c(42, 120, 42),
+            c(190, 110, 0),
+            c(0, 120, 175),
+            c(160, 80, 0),
+            c(110, 130, 110),
+            c(125, 90, 165),
+            c(0, 135, 135),
+            c(30, 30, 30),
+        ]
+    })
+}
+
+/// Default palette of the theme with the user's colours (category key -> RGBA) on top; unknown keys are ignored.
+pub fn sql_palette(overrides: &std::collections::BTreeMap<String, [u8; 4]>, dark: bool) -> SqlPalette {
+    let mut p = default_sql_palette(dark);
+    for cat in SqlCat::ALL {
+        if let Some([r, g, b, al]) = overrides.get(cat.key()) {
+            p.0[cat as usize] = Color32::from_rgba_unmultiplied(*r, *g, *b, *al);
+        }
+    }
+    p
+}
+
+#[cfg(test)]
+mod sql_palette_tests {
+    use super::*;
+
+    #[test]
+    fn default_colours_are_distinct_in_each_theme() {
+        for dark in [true, false] {
+            let p = default_sql_palette(dark);
+            for (i, a) in p.0.iter().enumerate() {
+                for b in &p.0[i + 1..] {
+                    assert_ne!(a, b, "dark={dark}");
+                }
+            }
+        }
+        for (i, c) in SqlCat::ALL.iter().enumerate() {
+            assert_eq!(*c as usize, i);
+        }
+    }
+
+    #[test]
+    fn overrides_apply_per_theme_and_ignore_unknown_keys() {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("table".to_string(), [0, 255, 0, 255]);
+        m.insert("nao_existe".to_string(), [1, 2, 3, 4]);
+        let p = sql_palette(&m, true);
+        assert_eq!(p.get(SqlCat::Table), Color32::from_rgb(0, 255, 0));
+        assert_eq!(p.get(SqlCat::Keyword), default_sql_palette(true).get(SqlCat::Keyword));
+        assert_eq!(sql_palette(&Default::default(), false), default_sql_palette(false));
+    }
+}

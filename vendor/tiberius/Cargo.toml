@@ -163,6 +163,15 @@ features = [
 ]
 optional = true
 
+[dependencies.openssl]
+version = "0.10"
+features = ["vendored"]
+optional = true
+
+[dependencies.tokio-openssl]
+version = "0.6"
+optional = true
+
 [dependencies.tokio-rustls]
 version = "0.24.0"
 features = ["dangerous_configuration"]
@@ -259,6 +268,12 @@ default = [
 docs = []
 integrated-auth-gssapi = ["libgssapi"]
 native-tls = ["async-native-tls"]
+# vendored change: OpenSSL (static) next to rustls, chosen per connection by `Config::legacy_tls`
+legacy-openssl = [
+    "rustls",
+    "openssl",
+    "tokio-openssl",
+]
 rustls = [
     "tokio-rustls",
     "tokio-util",

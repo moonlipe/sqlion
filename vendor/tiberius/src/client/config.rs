@@ -32,6 +32,8 @@ pub struct Config {
     pub(crate) trust: TrustConfig,
     pub(crate) auth: AuthMethod,
     pub(crate) readonly: bool,
+    /// vendored change: TLS 1.0+ and old cipher suites through OpenSSL (feature `legacy-openssl`)
+    pub(crate) legacy_tls: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -65,6 +67,7 @@ impl Default for Config {
             trust: TrustConfig::Default,
             auth: AuthMethod::None,
             readonly: false,
+            legacy_tls: false,
         }
     }
 }
@@ -113,6 +116,12 @@ impl Config {
     /// - Defaults to no name specified.
     pub fn application_name(&mut self, name: impl ToString) {
         self.application_name = Some(name.to_string());
+    }
+
+    /// Negotiate TLS through OpenSSL accepting TLS 1.0/1.1 and old cipher suites, for servers rustls cannot talk
+    /// to (vendored change, needs the `legacy-openssl` feature; without it the flag is ignored).
+    pub fn legacy_tls(&mut self, legacy: bool) {
+        self.legacy_tls = legacy;
     }
 
     /// Set the preferred encryption level.

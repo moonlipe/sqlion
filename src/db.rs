@@ -145,6 +145,36 @@ pub struct ConnConfig {
     pub conn_type: crate::constants::ConnType,
     #[serde(default)]
     pub flavor: String,
+    /// SQL Server: how TLS is negotiated (connections saved before this field are Auto)
+    #[serde(default)]
+    pub mssql_encryption: MsEncryption,
+}
+
+/// TLS of a SQL Server connection.
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq, Default)]
+pub enum MsEncryption {
+    /// modern TLS; when the handshake fails, a second try in legacy mode
+    #[default]
+    Auto,
+    /// TLS 1.2/1.3 only (rustls)
+    Modern,
+    /// TLS 1.0+ and old cipher suites (static OpenSSL)
+    Legacy,
+    /// no TLS at all: only for servers that do not require encryption
+    Off,
+}
+
+impl MsEncryption {
+    pub const ALL: [MsEncryption; 4] = [MsEncryption::Auto, MsEncryption::Modern, MsEncryption::Legacy, MsEncryption::Off];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MsEncryption::Auto => "Automático",
+            MsEncryption::Modern => "Moderno (TLS 1.2+)",
+            MsEncryption::Legacy => "Legado (TLS 1.0+)",
+            MsEncryption::Off => "Sem criptografia",
+        }
+    }
 }
 
 impl ConnConfig {
@@ -172,6 +202,7 @@ impl ConnConfig {
             read_only: false,
             conn_type: crate::constants::ConnType::Dev,
             flavor: String::new(),
+            mssql_encryption: MsEncryption::Auto,
         }
     }
     /// How the connection is drawn: the user's choice, else the default of its database type.

@@ -13,13 +13,27 @@ mod opentls_tls_stream;
 #[cfg(feature = "native-tls")]
 pub(crate) use native_tls_stream::TlsStream;
 
-#[cfg(feature = "rustls")]
+#[cfg(feature = "legacy-openssl")]
+mod openssl_legacy_stream;
+
+#[cfg(all(feature = "rustls", not(feature = "legacy-openssl")))]
 pub(crate) use rustls_tls_stream::TlsStream;
+
+#[cfg(feature = "legacy-openssl")]
+pub(crate) use openssl_legacy_stream::TlsStream;
 
 #[cfg(feature = "vendored-openssl")]
 pub(crate) use opentls_tls_stream::TlsStream;
 
-#[cfg(feature = "rustls")]
+#[cfg(all(feature = "rustls", not(feature = "legacy-openssl")))]
+pub(crate) async fn create_tls_stream<S: AsyncRead + AsyncWrite + Unpin + Send>(
+    config: &Config,
+    stream: S,
+) -> crate::Result<TlsStream<S>> {
+    TlsStream::new(config, stream).await
+}
+
+#[cfg(feature = "legacy-openssl")]
 pub(crate) async fn create_tls_stream<S: AsyncRead + AsyncWrite + Unpin + Send>(
     config: &Config,
     stream: S,

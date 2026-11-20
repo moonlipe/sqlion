@@ -4,7 +4,7 @@ use crate::db::*;
 use crate::editing;
 use crate::grid::{self, EditSource, GridAction, GridState, RowState, ViewMode};
 use crate::icons::{self, Icon};
-use crate::theme::pal;
+use crate::theme::{pal, SqlCat, SqlPalette};
 use crate::sqltext::{self, Tok};
 use egui::text::{CCursor, CCursorRange, LayoutJob};
 use egui::{Color32, FontId, RichText, Sense, TextFormat, Ui};
@@ -55,43 +55,90 @@ pub enum SqlCmd {
 }
 
 // ---------------------------------------------------------------- highlighting
-pub fn highlight(text: &str, dark: bool, size: f32, wrap: f32) -> LayoutJob {
+/// Known table/view and column names (lower case) used to colour identifiers.
+#[derive(Default, Debug)]
+pub struct HlNames {
+    pub tables: std::collections::HashSet<String>,
+    pub columns: std::collections::HashSet<String>,
+}
+
+impl HlNames {
+    fn knows(&self, name: &str) -> bool {
+        let l = name.to_lowercase();
+        self.tables.contains(&l) || self.columns.contains(&l)
+    }
+}
+
+/// Colour of an identifier: after a `.` it is a column first (`alias.col`), otherwise a table first.
+fn ident_cat(word: &str, after_dot: bool, names: Option<&HlNames>) -> SqlCat {
+    let Some(n) = names else { return SqlCat::Text };
+    let l = word.to_lowercase();
+    let (t, c) = (n.tables.contains(&l), n.columns.contains(&l));
+    match (after_dot, t, c) {
+        (true, _, true) | (false, false, true) => SqlCat::Column,
+        (_, true, _) => SqlCat::Table,
+        _ => SqlCat::Text,
+    }
+}
+
+/// Text inside `"..."` / `` `...` `` without the quotes, with doubled quotes undone.
+fn unquote(t: &str) -> String {
+    let q = t.chars().next().unwrap_or('"');
+    let inner = t.strip_prefix(q).unwrap_or(t);
+    let inner = inner.strip_suffix(q).unwrap_or(inner);
+    let dq: String = [q, q].iter().collect();
+    inner.replace(&dq, &q.to_string())
+}
+
+pub fn highlight(text: &str, pal: &SqlPalette, size: f32, wrap: f32, names: Option<&HlNames>) -> LayoutJob {
     let mut job = LayoutJob::default();
     job.wrap.max_width = wrap;
     let font = FontId::monospace(size);
-    let (kw, st, nu, co, pa, id) = if dark {
-        (
-            Color32::from_rgb(86, 156, 214),
-            Color32::from_rgb(206, 145, 120),
-            Color32::from_rgb(181, 206, 168),
-            Color32::from_rgb(106, 153, 85),
-            Color32::from_rgb(197, 134, 192),
-            Color32::from_rgb(212, 212, 212),
-        )
-    } else {
-        (
-            Color32::from_rgb(0, 0, 192),
-            Color32::from_rgb(42, 120, 42),
-            Color32::from_rgb(160, 80, 0),
-            Color32::from_rgb(110, 130, 110),
-            Color32::from_rgb(130, 0, 130),
-            Color32::from_rgb(30, 30, 30),
-        )
-    };
-    for (k, a, b) in sqltext::tokenize(text) {
-        let color = match k {
-            Tok::Keyword => kw,
-            Tok::Str => st,
-            Tok::Number => nu,
-            Tok::Comment => co,
-            Tok::Param => pa,
-            _ => id,
-        };
-        let mut f = TextFormat::simple(font.clone(), color);
-        if k == Tok::Comment {
-            f.italics = true;
+    let fmt = |cat: SqlCat| TextFormat::simple(font.clone(), pal.get(cat));
+    let mut prev_dot = false;
+    let toks = sqltext::tokenize(text);
+    // column aliases are coloured as columns, with or without metadata
+    let aliases = sqltext::column_aliases(text, &toks);
+    for (k, a, b) in toks {
+        let t = &text[a..b];
+        match k {
+            Tok::Str | Tok::QuotedIdent => {
+                let base = match k {
+                    Tok::Str => SqlCat::Str,
+                    _ if names.is_some_and(|n| n.knows(&unquote(t))) || aliases.contains(&unquote(t).to_lowercase()) => SqlCat::QuotedKnown,
+                    _ => SqlCat::Quoted,
+                };
+                for (var, x, y) in sqltext::str_var_spans(text, a, b) {
+                    let mut f = fmt(if var { SqlCat::Variable } else { base });
+                    if var {
+                        f.background = pal.get(SqlCat::VariableBg);
+                    }
+                    job.append(&text[x..y], 0.0, f);
+                }
+            }
+            _ => {
+                let cat = match k {
+                    Tok::Keyword => SqlCat::Keyword,
+                    Tok::Function => SqlCat::Function,
+                    Tok::Number => SqlCat::Number,
+                    Tok::Comment => SqlCat::Comment,
+                    Tok::Variable => SqlCat::Variable,
+                    // `::type` casts are not parameters
+                    Tok::Param if !(a > 0 && text.as_bytes()[a - 1] == b':') => SqlCat::Variable,
+                    Tok::Ident => match ident_cat(t, prev_dot, names) {
+                        SqlCat::Text if !prev_dot && aliases.contains(&t.to_lowercase()) => SqlCat::Column,
+                        c => c,
+                    },
+                    _ => SqlCat::Text,
+                };
+                let mut f = fmt(cat);
+                f.italics = k == Tok::Comment;
+                job.append(t, 0.0, f);
+            }
         }
-        job.append(&text[a..b], 0.0, f);
+        if k != Tok::Space {
+            prev_dot = t == ".";
+        }
     }
     job
 }
@@ -153,6 +200,18 @@ pub struct SqlTab {
     pub set_scroll: Option<f32>,
     /// give the keyboard to the editor on the next frame (a tab restored with its cursor)
     pub focus_editor: bool,
+    /// table/column names for the highlighting, rebuilt only when the metadata or the cited tables change
+    pub hl: Option<HlCache>,
+}
+
+pub struct HlCache {
+    conn: String,
+    gen: u64,
+    text_hash: u64,
+    refs: Vec<String>,
+    names: std::sync::Arc<HlNames>,
+    /// metadata already requested for this connection: a failed load is not asked again on every frame
+    asked: std::collections::HashSet<String>,
 }
 
 impl SqlTab {
@@ -184,7 +243,59 @@ impl SqlTab {
             scroll_y: 0.0,
             set_scroll: None,
             focus_editor: false,
+            hl: None,
         }
+    }
+
+    /// Names for colouring tables and columns. Only cached metadata is used; what is missing is requested in the
+    /// background (once per tab and connection) and shows up when `meta_gen` changes. Never waits for the database.
+    pub fn hl_names(&mut self, sh: &mut Shared) -> Option<std::sync::Arc<HlNames>> {
+        use std::hash::{Hash, Hasher};
+        if !sh.store.prefs.hl_metadata {
+            return None;
+        }
+        let conn = self.conn.clone().filter(|c| sh.is_connected(c))?;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.text.hash(&mut h);
+        let text_hash = h.finish();
+        let same_conn = self.hl.as_ref().is_some_and(|c| c.conn == conn);
+        if let Some(c) = self.hl.as_ref().filter(|c| same_conn && c.gen == sh.meta_gen && c.text_hash == text_hash) {
+            return Some(c.names.clone());
+        }
+        let mut refs: Vec<String> = sqltext::referenced_tables(&self.text).into_iter().map(|(t, _)| t.to_lowercase()).collect();
+        refs.sort();
+        refs.dedup();
+        if let Some(c) = self.hl.as_mut().filter(|c| same_conn && c.gen == sh.meta_gen && c.refs == refs) {
+            c.text_hash = text_hash;
+            return Some(c.names.clone());
+        }
+        let mut asked = match self.hl.take() {
+            Some(c) if same_conn => c.asked,
+            _ => Default::default(),
+        };
+        let gen = sh.meta_gen;
+        let mut names = HlNames::default();
+        if let Some(schema) = sh.cached_default_schema(&conn) {
+            if !sh.tables.contains_key(&(conn.clone(), schema.clone())) && asked.insert(format!("t|{schema}")) {
+                sh.want_tables(&conn, &schema);
+            }
+            let tables = sh.tables.get(&(conn.clone(), schema.clone())).cloned().unwrap_or_default();
+            for (t, _) in &tables {
+                names.tables.insert(t.to_lowercase());
+            }
+            for (t, _) in tables.iter().filter(|(t, _)| refs.contains(&t.to_lowercase())) {
+                let key = (conn.clone(), schema.clone(), t.clone());
+                if !sh.tmeta.contains_key(&key) && asked.insert(format!("m|{schema}|{t}")) {
+                    sh.want_tmeta(&conn, &schema, t);
+                }
+                if let Some(m) = sh.tmeta.get(&key) {
+                    names.columns.extend(m.columns.iter().map(|c| c.name.to_lowercase()));
+                }
+            }
+        }
+        let names = std::sync::Arc::new(names);
+        self.hl = Some(HlCache { conn, gen, text_hash, refs, names: names.clone(), asked });
+        Some(names)
     }
 
     pub fn save_file(&mut self) {
@@ -636,7 +747,7 @@ impl SqlTab {
             }
             SqlCmd::Complete => {
                 self.start_complete(sh);
-                if crate::constants::AUTOCOMPLETE_INSERT_SINGLE {
+                if sh.store.prefs.ac_insert_single {
                     if let Some(ac) = &self.ac {
                         if ac.items.len() == 1 {
                             let (item, start) = (ac.items[0].clone(), ac.start_char);
@@ -736,7 +847,7 @@ impl SqlTab {
 
         // auto-close quotes and brackets (SQLEDITOR_CLOSE_SINGLE_QUOTES / DOUBLE_QUOTES / BRACKETS = true)
         let mut pair_cursor: Option<usize> = None;
-        if crate::constants::AUTO_CLOSE_PAIRS && self.cursor.0 == self.cursor.1 && self.ac.is_none() {
+        if sh.store.prefs.auto_close_pairs && self.cursor.0 == self.cursor.1 && self.ac.is_none() {
             let cur_b = byte_of_char(&self.text, self.cursor.0);
             let next = self.text[cur_b..].chars().next();
             let prev = self.text[..cur_b].chars().next_back();
@@ -791,6 +902,8 @@ impl SqlTab {
             }
         }
 
+        let sql_pal = sh.store.prefs.sql_palette(dark);
+        let hl_names = self.hl_names(sh);
         let editor_h = ui.available_height();
         let mut area = egui::ScrollArea::vertical().id_salt(("sql_scroll", tab_id)).auto_shrink([false, false]);
         if let Some(y) = self.set_scroll.take() {
@@ -798,7 +911,7 @@ impl SqlTab {
         }
         let scrolled = area.show(ui, |ui| {
             let mut layouter = |ui: &Ui, text: &dyn egui::TextBuffer, wrap: f32| {
-                let job = highlight(text.as_str(), dark, size, wrap);
+                let job = highlight(text.as_str(), &sql_pal, size, wrap, hl_names.as_deref());
                 ui.fonts_mut(|f| f.layout_job(job))
             };
             let id = egui::Id::new(("sql_edit", tab_id));
@@ -826,7 +939,7 @@ impl SqlTab {
                 let before = &self.text[..cur_b];
                 let word_len = before.chars().rev().take_while(|c| c.is_alphanumeric() || *c == '_').count();
                 let after_dot = before.ends_with('.');
-                if crate::constants::AUTOCOMPLETE_AUTO_ACTIVATION && (after_dot || word_len >= 2) {
+                if sh.store.prefs.ac_auto_popup && (after_dot || word_len >= 2) {
                     self.cursor = (out.cursor_range.map(|r| r.primary.index.into()).unwrap_or(self.cursor.0), out.cursor_range.map(|r| r.secondary.index.into()).unwrap_or(self.cursor.1));
                     self.start_complete(sh);
                 } else {
@@ -2044,6 +2157,98 @@ mod editor_tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         panic!("metadata did not arrive");
+    }
+
+    /// colour of each occurrence of `word` as a whole token (adjacent sections with the same format are merged)
+    fn colour_of(job: &LayoutJob, word: &str) -> Vec<Color32> {
+        let t = &job.text;
+        let ident = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == ':');
+        t.match_indices(word)
+            .filter(|(i, _)| !ident(t[..*i].chars().last()) && !ident(t[i + word.len()..].chars().next()))
+            .map(|(i, _)| job.sections.iter().find(|s| s.byte_range.start.0 <= i && i < s.byte_range.end.0).unwrap().format.color)
+            .collect()
+    }
+
+    #[test]
+    fn highlight_tables_columns_and_quoted_names() {
+        let pal = crate::theme::default_sql_palette(true);
+        let mut n = HlNames::default();
+        n.tables.insert("clientes".into());
+        n.columns.insert("nome".into());
+        let job = highlight("select c.nome from clientes c", &pal, 14.0, 100.0, Some(&n));
+        assert_eq!(colour_of(&job, "clientes"), vec![pal.get(SqlCat::Table)]);
+        assert_eq!(colour_of(&job, "nome"), vec![pal.get(SqlCat::Column)]);
+        assert_eq!(colour_of(&job, "c"), vec![pal.get(SqlCat::Text); 2]);
+        let q = r#"select "Nome", "Outro" from "Clientes""#;
+        let job = highlight(q, &pal, 14.0, 100.0, Some(&n));
+        assert_eq!(colour_of(&job, "\"Nome\""), vec![pal.get(SqlCat::QuotedKnown)]);
+        assert_eq!(colour_of(&job, "\"Clientes\""), vec![pal.get(SqlCat::QuotedKnown)]);
+        assert_eq!(colour_of(&job, "\"Outro\""), vec![pal.get(SqlCat::Quoted)]);
+        let job = highlight(q, &pal, 14.0, 100.0, None);
+        for w in ["\"Nome\"", "\"Clientes\""] {
+            assert_eq!(colour_of(&job, w), vec![pal.get(SqlCat::Quoted)]);
+        }
+        let job = highlight("select c.nome from clientes c", &pal, 14.0, 100.0, None);
+        assert_eq!(colour_of(&job, "clientes"), vec![pal.get(SqlCat::Text)]);
+        // column aliases, where defined and where used, even without metadata
+        let job = highlight(r#"select count(*) as qtd, v "Bruto" from t order by qtd"#, &pal, 14.0, 100.0, None);
+        assert_eq!(colour_of(&job, "qtd"), vec![pal.get(SqlCat::Column); 2]);
+        assert_eq!(colour_of(&job, "\"Bruto\""), vec![pal.get(SqlCat::QuotedKnown)]);
+        assert_eq!(colour_of(&job, "t"), vec![pal.get(SqlCat::Text)]);
+    }
+
+    #[test]
+    fn highlight_variables_inside_strings_and_categories() {
+        let pal = crate::theme::default_sql_palette(false);
+        let job = highlight("exec p @a, 'arquivo_${data}.csv', convert(int, x)::int", &pal, 14.0, 100.0, None);
+        let var = job.sections.iter().find(|s| job.text[s.byte_range.start.0..s.byte_range.end.0].starts_with("${data}")).unwrap();
+        assert_eq!(var.format.color, pal.get(SqlCat::Variable));
+        assert_eq!(var.format.background, pal.get(SqlCat::VariableBg));
+        assert_eq!(colour_of(&job, "'arquivo_"), vec![pal.get(SqlCat::Str)]);
+        assert_eq!(colour_of(&job, "@a"), vec![pal.get(SqlCat::Variable)]);
+        assert_eq!(colour_of(&job, "convert"), vec![pal.get(SqlCat::Function)]);
+        assert_eq!(colour_of(&job, "exec"), vec![pal.get(SqlCat::Keyword)]);
+        let at = job.text.rfind(":int").unwrap();
+        let sec = job.sections.iter().find(|s| s.byte_range.start.0 <= at && at < s.byte_range.end.0).unwrap();
+        assert_eq!(sec.format.color, pal.get(SqlCat::Text), "a ::cast is not a parameter");
+    }
+
+    #[test]
+    fn single_proposal_is_listed_when_insert_single_is_off() {
+        let (mut sh, id) = sqlite();
+        let text = "select * from customer_t";
+        let n = text.chars().count();
+        let mut tab = SqlTab::new(Some(id.clone()), text.into(), "t".into());
+        tab.cursor = (n, n);
+        tab.apply_cmd(&mut sh, 1, SqlCmd::Complete);
+        wait_meta(&mut sh);
+        sh.store.prefs.ac_insert_single = false;
+        tab.apply_cmd(&mut sh, 1, SqlCmd::Complete);
+        assert_eq!(tab.text, text, "nothing is inserted");
+        assert_eq!(tab.ac.as_ref().map(|a| a.items.clone()), Some(vec!["customer_totals".to_string()]));
+        sh.store.prefs.ac_insert_single = true;
+        tab.apply_cmd(&mut sh, 1, SqlCmd::Complete);
+        assert!(tab.text.starts_with("select * from customer_totals"), "{}", tab.text);
+    }
+
+    #[test]
+    fn highlight_names_come_from_cache_in_background() {
+        let (mut sh, id) = sqlite();
+        let mut tab = SqlTab::new(Some(id.clone()), "select first_name from customers".into(), "t".into());
+        // nothing cached: answers right away, without the names
+        let n = tab.hl_names(&mut sh).unwrap();
+        assert!(n.tables.is_empty() && n.columns.is_empty());
+        for _ in 0..3 {
+            wait_meta(&mut sh);
+            tab.hl_names(&mut sh);
+        }
+        let n = tab.hl_names(&mut sh).unwrap();
+        assert!(n.tables.contains("customers"));
+        assert!(n.columns.contains("first_name"), "{n:?}");
+        // the same text and metadata reuse the cached names
+        assert!(std::sync::Arc::ptr_eq(&n, &tab.hl_names(&mut sh).unwrap()));
+        sh.store.prefs.hl_metadata = false;
+        assert!(tab.hl_names(&mut sh).is_none());
     }
 
     #[test]
