@@ -55,6 +55,8 @@ pub struct Prefs {
     pub null_text: String,
     /// folder of the saved scripts; empty = <config>/scripts. Point it inside a git repository to version the scripts.
     pub scripts_dir: String,
+    /// reopen the tabs of the last session (kept in `session.json`)
+    pub restore_tabs: bool,
 }
 
 impl Default for Prefs {
@@ -76,6 +78,7 @@ impl Default for Prefs {
             show_value_panel: false,
             null_text: crate::constants::NULL_LABEL.into(),
             scripts_dir: String::new(),
+            restore_tabs: true,
         }
     }
 }
@@ -165,6 +168,10 @@ pub struct Store {
     pub prefs: Prefs,
     #[serde(skip)]
     pub path: Option<PathBuf>,
+    /// project id -> text of its project file as last read or written by the app, to notice changes made
+    /// outside it (a `git pull`) and never overwrite them
+    #[serde(skip)]
+    pub project_seen: std::sync::Mutex<std::collections::HashMap<String, String>>,
 }
 
 impl Store {
@@ -200,6 +207,7 @@ impl Store {
         if pf.format_version == 0 || pf.format_version > PROJECT_FORMAT {
             return Err(format!("Versão de formato desconhecida ({}); atualize o Sqlion", pf.format_version));
         }
+        self.mark_project_seen(&p.id, &text);
         if !pf.name.is_empty() {
             p.name = pf.name.clone();
         }
@@ -294,6 +302,41 @@ impl Store {
     }
 
     /// Opens an existing folder (for instance a clone) as a project.
+    /// Reads the project file again (after a `git pull`, for instance), keeping the project's place in the list.
+    /// On failure (a file being merged, an unknown version) nothing changes.
+    pub fn reload_project(&mut self, id: &str) -> Result<(), String> {
+        let pos = self.projects.iter().position(|p| p.id == id).ok_or("Projeto não encontrado")?;
+        let p = self.projects[pos].clone();
+        let mut fresh = self.clone_for_reload();
+        fresh.script_conns.retain(|k, _| !k.starts_with(&format!("{}/", id)));
+        fresh.attach_project(p)?;
+        let moved = fresh.projects.pop().expect("attach_project pushes the project");
+        fresh.projects.insert(pos, moved);
+        // a password typed for this session only (not kept in secrets) survives the reload
+        for c in fresh.connections.iter_mut().filter(|c| c.project == id && c.password.is_empty()) {
+            if let Some(old) = self.connections.iter().find(|o| o.id == c.id && !o.password.is_empty()) {
+                c.password = old.password.clone();
+            }
+        }
+        if let Some(text) = fresh.project_seen.lock().ok().and_then(|m| m.get(id).cloned()) {
+            self.mark_project_seen(id, &text);
+        }
+        self.projects = fresh.projects;
+        self.connections = fresh.connections;
+        self.script_conns = fresh.script_conns;
+        Ok(())
+    }
+
+    /// The parts of the store that a project reload touches, so that a failed reload leaves `self` untouched.
+    fn clone_for_reload(&self) -> Store {
+        let mut s = Store::memory();
+        s.projects = self.projects.clone();
+        s.connections = self.connections.clone();
+        s.script_conns = self.script_conns.clone();
+        s.secrets = self.secrets.clone();
+        s
+    }
+
     pub fn open_project(&mut self, dir: &std::path::Path) -> Result<Project, String> {
         if let Some(p) = self.projects.iter().find(|p| p.dir() == dir) {
             return Ok(p.clone());
@@ -339,8 +382,9 @@ impl Store {
     }
 
     /// Deletes the project folder from disk and closes the project. Refuses folders that are not projects, roots and the home folder.
-    pub fn delete_project_folder(&mut self, id: &str) -> Result<(), String> {
-        let p = self.projects.iter().find(|p| p.id == id).cloned().ok_or("Projeto não encontrado")?;
+    /// The safety checks of `delete_project_folder`, without touching anything: the folder that would be deleted.
+    pub fn check_project_deletable(&self, id: &str) -> Result<PathBuf, String> {
+        let p = self.projects.iter().find(|p| p.id == id).ok_or("Projeto não encontrado")?;
         let dir = p.dir();
         if !p.file().is_file() {
             return Err("A pasta não tem o arquivo do projeto; nada foi apagado".into());
@@ -350,6 +394,16 @@ impl Store {
         if canon.parent().is_none() || home.as_ref().map(|h| h.starts_with(&canon)).unwrap_or(false) {
             return Err("Por segurança, esta pasta não pode ser excluída".into());
         }
+        Ok(dir)
+    }
+
+    /// Ids of the connections that belong to the project.
+    pub fn project_conn_ids(&self, id: &str) -> Vec<String> {
+        self.connections.iter().filter(|c| c.project == id).map(|c| c.id.clone()).collect()
+    }
+
+    pub fn delete_project_folder(&mut self, id: &str) -> Result<(), String> {
+        let dir = self.check_project_deletable(id)?;
         std::fs::remove_dir_all(&dir).map_err(|e| format!("Não foi possível excluir {}: {}", dir.display(), e))?;
         self.close_project(id);
         Ok(())
@@ -516,9 +570,36 @@ impl Store {
         let prefix = format!("{}/", p.id);
         let script_conns = self.script_conns.iter().filter_map(|(k, v)| k.strip_prefix(&prefix).map(|n| (n.to_string(), v.clone()))).collect();
         let pf = ProjectFile { format_version: PROJECT_FORMAT, name: p.name.clone(), connections: conns, script_conns, folders: p.folders.clone() };
-        let text = serde_json::to_string_pretty(&pf).map_err(|e| e.to_string())?;
+        let text = serde_json::to_string_pretty(&pf).map_err(|e| e.to_string())? + "\n";
+        let disk = std::fs::read_to_string(p.file()).ok();
+        if disk.as_deref() == Some(text.as_str()) {
+            self.mark_project_seen(&p.id, &text);
+            return Ok(());
+        }
+        if self.project_changed_on_disk(&p.id) {
+            return Err(format!("O arquivo {} mudou fora do Sqlion e não foi sobrescrito; troque de janela e volte para recarregá-lo", p.file().display()));
+        }
         std::fs::create_dir_all(p.dir()).map_err(|e| e.to_string())?;
-        std::fs::write(p.file(), text + "\n").map_err(|e| e.to_string())
+        std::fs::write(p.file(), &text).map_err(|e| e.to_string())?;
+        self.mark_project_seen(&p.id, &text);
+        Ok(())
+    }
+
+    fn mark_project_seen(&self, id: &str, text: &str) {
+        if let Ok(mut m) = self.project_seen.lock() {
+            m.insert(id.to_string(), text.to_string());
+        }
+    }
+
+    /// True when the project file on disk differs from what the app last read or wrote (only for files the
+    /// app has seen: a project file that does not exist yet is not an outside change).
+    pub fn project_changed_on_disk(&self, id: &str) -> bool {
+        let Some(p) = self.projects.iter().find(|p| p.id == id) else { return false };
+        let seen = self.project_seen.lock().ok().and_then(|m| m.get(id).cloned());
+        match (seen, std::fs::read_to_string(p.file()).ok()) {
+            (Some(s), Some(d)) => s != d,
+            _ => false,
+        }
     }
 
     pub fn set_secret(&mut self, conn_id: &str, password: &str) {
@@ -728,6 +809,59 @@ mod tests {
         let e = s.open_project(&repo).unwrap_err();
         assert!(e.contains("99"), "{}", e);
         assert!(s.projects.is_empty() && s.connections.is_empty());
+    }
+
+    /// What a `git pull` does: another version of the project file replaces the one on disk.
+    fn rewrite_from_outside(s: &Store, id: &str, name: &str, conn_name: &str) {
+        let p = s.projects.iter().find(|p| p.id == id).unwrap().clone();
+        let mut other = Store::memory();
+        other.projects.push(Project { name: name.into(), ..p.clone() });
+        let mut c = s.connections.iter().find(|c| c.project == id).unwrap().clone();
+        c.name = conn_name.into();
+        other.connections.push(c);
+        std::fs::write(p.file(), {
+            other.write_project(&other.projects[0]).unwrap();
+            std::fs::read_to_string(p.file()).unwrap()
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn outside_changes_are_reloaded_and_never_overwritten() {
+        let base = temp_base("reload");
+        let mut s = Store::memory();
+        let a = s.create_project("A", &base.join("a")).unwrap();
+        let b = s.create_project("B", &base.join("b")).unwrap();
+        let mut c = ConnConfig::new(Kind::Sqlite);
+        c.name = "local".into();
+        c.project = a.id.clone();
+        c.password = "digitada nesta sessão".into();
+        let cid = c.id.clone();
+        s.connections.push(c);
+        s.write_project(&a).unwrap();
+        assert!(!s.project_changed_on_disk(&a.id), "its own write is not an outside change");
+        rewrite_from_outside(&s, &a.id, "A do repositório", "do repositório");
+        assert!(s.project_changed_on_disk(&a.id));
+        assert!(!s.project_changed_on_disk(&b.id));
+        // a save before the reload must not overwrite the pulled file
+        let pulled = std::fs::read_to_string(a.file()).unwrap();
+        assert!(s.write_project(&a).is_err());
+        assert_eq!(std::fs::read_to_string(a.file()).unwrap(), pulled);
+        s.reload_project(&a.id).unwrap();
+        assert!(!s.project_changed_on_disk(&a.id));
+        assert_eq!(s.projects.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec![a.id.as_str(), b.id.as_str()], "the project keeps its place");
+        assert_eq!(s.projects[0].name, "A do repositório");
+        let c = s.connections.iter().find(|c| c.id == cid).unwrap();
+        assert_eq!(c.name, "do repositório");
+        assert_eq!(c.password, "digitada nesta sessão", "a session password survives the reload");
+        // after the reload, saving works again
+        s.write_project(&s.projects[0].clone()).unwrap();
+        // an unreadable file (a merge in progress) changes nothing
+        std::fs::write(a.file(), "<<<<<<< HEAD").unwrap();
+        assert!(s.reload_project(&a.id).is_err());
+        assert_eq!(s.projects[0].name, "A do repositório");
+        assert!(s.connections.iter().any(|c| c.id == cid));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

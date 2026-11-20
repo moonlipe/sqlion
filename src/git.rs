@@ -40,6 +40,40 @@ pub fn init(dir: &Path) -> Out {
     run(dir, &["init"])
 }
 
+/// Entries of the suggested `.gitignore`: files that belong to one machine and never go into the repository.
+pub const SUGGESTED_IGNORE: &[&str] = &["*.local", "secrets.json", "session.json"];
+
+/// Entries of the suggestion that the `.gitignore` of `dir` does not have yet.
+pub fn missing_ignores(dir: &Path) -> Vec<&'static str> {
+    let have = std::fs::read_to_string(dir.join(".gitignore")).unwrap_or_default();
+    let lines: Vec<&str> = have.lines().map(|l| l.trim()).collect();
+    SUGGESTED_IGNORE.iter().copied().filter(|e| !lines.contains(e)).collect()
+}
+
+/// Adds the missing entries of the suggestion to `.gitignore`, keeping what is already there.
+pub fn write_suggested_ignore(dir: &Path) -> Out {
+    let missing = missing_ignores(dir);
+    if missing.is_empty() {
+        return Out { ok: true, text: "O .gitignore já tem as entradas sugeridas.".into() };
+    }
+    let path = dir.join(".gitignore");
+    let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    if text.is_empty() {
+        text.push_str("# arquivos locais do Sqlion (senhas e estado das abas ficam fora do repositório)\n");
+    }
+    for e in &missing {
+        text.push_str(e);
+        text.push('\n');
+    }
+    match std::fs::write(&path, text) {
+        Ok(_) => Out { ok: true, text: format!("Adicionado ao .gitignore: {}", missing.join(", ")) },
+        Err(e) => Out { ok: false, text: format!("Não foi possível gravar {}: {}", path.display(), e) },
+    }
+}
+
 pub fn status(dir: &Path) -> Out {
     run(dir, &["status", "--short", "--branch"])
 }
@@ -96,6 +130,23 @@ pub fn branch(dir: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suggested_ignore_adds_only_the_missing_entries() {
+        let d = std::env::temp_dir().join(format!("dbr-test-ignore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(missing_ignores(&d), SUGGESTED_IGNORE.to_vec());
+        std::fs::write(d.join(".gitignore"), "target/\nsecrets.json").unwrap();
+        assert_eq!(missing_ignores(&d), vec!["*.local", "session.json"]);
+        assert!(write_suggested_ignore(&d).ok);
+        let text = std::fs::read_to_string(d.join(".gitignore")).unwrap();
+        assert_eq!(text, "target/\nsecrets.json\n*.local\nsession.json\n", "existing lines are kept, nothing is repeated");
+        assert!(missing_ignores(&d).is_empty());
+        assert!(write_suggested_ignore(&d).ok, "a second call changes nothing");
+        assert_eq!(std::fs::read_to_string(d.join(".gitignore")).unwrap(), text);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn init_commit_status_log() {

@@ -25,12 +25,12 @@
 
 ## 5. CI e release multiplataforma
 
-- [ ] 5.1 Criar `.github/workflows/ci.yml` (`cargo test`, `cargo build` no Linux com dependências do `eframe`, em PR e `main`); verificar com `actionlint` e o primeiro run verde.
-- [ ] 5.2 Criar `.github/workflows/release.yml` com gatilho de tag `v*.*.*` e `workflow_dispatch`, permissões `contents: write` e a matriz de 5 alvos (Linux x86_64 e arm64, Windows x86_64, macOS arm64 e x86_64); verificar com `actionlint` e um run manual que gera os artefatos.
-- [ ] 5.3 Passo de verificação tag = versão do `Cargo.toml`, empacotamento (`sqlion-<versão>-<alvo>.tar.gz/.zip` com binário, LICENSE e README) e `SHA256SUMS`; verificar baixando os artefatos de um run e conferindo nomes, conteúdo e checksums.
+- [x] 5.1 Criar `.github/workflows/ci.yml` (`cargo test`, `cargo build` no Linux com dependências do `eframe`, em PR e `main`); verificar com `actionlint` e o primeiro run verde.
+- [x] 5.2 Criar `.github/workflows/release.yml` com gatilho de tag `v*.*.*` e `workflow_dispatch`, permissões `contents: write` e a matriz de 5 alvos (Linux x86_64 e arm64, Windows x86_64, macOS arm64 e x86_64); verificar com `actionlint` e um run manual que gera os artefatos.
+- [x] 5.3 Passo de verificação tag = versão do `Cargo.toml`, empacotamento (`sqlion-<versão>-<alvo>.tar.gz/.zip` com binário, LICENSE e README) e `SHA256SUMS`; verificar baixando os artefatos de um run e conferindo nomes, conteúdo e checksums.
 - [x] 5.3b Adicionar `.gitattributes` com `export-ignore` (`openspec/`, `.github/`, `docs/` se interno) e gerar no job `release` o `sqlion-<versão>-source.tar.gz` e `.zip` com `git archive`, incluídos no `SHA256SUMS`; verificar extraindo o zip, conferindo que não há `target/`, `.git/` nem `.env`, e que `cargo build --release` compila a partir dele.
-- [ ] 5.4 Job `release` que cria o GitHub Release com `--generate-notes` somente se todos os builds passarem (5 alvos) e não roda em `workflow_dispatch`; verificar empurrando uma tag de teste (`v0.0.0-test`) num fork ou apagando release e tag depois.
-- [ ] 5.5 Adicionar `#![windows_subsystem = "windows"]` condicional ao build release em `src/main.rs`; verificar que o executável Windows abre sem console e que o Linux/macOS não mudam.
+- [x] 5.4 Job `release` que cria o GitHub Release com `--generate-notes` somente se todos os builds passarem (5 alvos) e não roda em `workflow_dispatch`; verificar empurrando uma tag de teste (`v0.0.0-test`) num fork ou apagando release e tag depois.
+- [x] 5.5 Adicionar `#![windows_subsystem = "windows"]` condicional ao build release em `src/main.rs`; verificar que o executável Windows abre sem console e que o Linux/macOS não mudam.
 - [x] 5.6 Documentar no README o processo de lançamento (atualizar `Cargo.toml`, tag, push), os pacotes gerados, como compilar a partir do código-fonte (Rust, dependências de sistema por plataforma) e o aviso do Gatekeeper no macOS; verificar relendo o passo a passo contra os workflows.
 
 ## 6. Integração

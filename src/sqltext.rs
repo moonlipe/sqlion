@@ -301,6 +301,26 @@ fn param_literal(v: &str) -> String {
     }
 }
 
+/// Names of the `${name}` variables in the text, in order, without repeats.
+pub fn find_vars(s: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = s;
+    while let Some(i) = rest.find("${") {
+        let after = &rest[i + 2..];
+        match after.find('}') {
+            Some(j) => {
+                let name = after[..j].trim();
+                if !name.is_empty() && !name.contains(['\n', '$', '{']) && !out.iter().any(|n| n == name) {
+                    out.push(name.to_string());
+                }
+                rest = &after[j + 1..];
+            }
+            None => break,
+        }
+    }
+    out
+}
+
 /// Replace `${var}` with values.
 pub fn substitute_vars(s: &str, vars: &[(String, String)]) -> String {
     let mut out = s.to_string();
@@ -704,6 +724,13 @@ mod tests {
         let s = "CREATE TRIGGER t AFTER INSERT ON a BEGIN INSERT INTO b VALUES (1); INSERT INTO b VALUES (2); END;\nselect 1;";
         let v = split_statements(s, ";");
         assert_eq!(v.len(), 2);
+    }
+
+    #[test]
+    fn vars_found_once_each() {
+        assert_eq!(find_vars("select ${a}, ${ b } from t where x = '${a}' and ${}"), vec!["a", "b"]);
+        assert_eq!(find_vars("select ${aberto"), Vec::<String>::new());
+        assert_eq!(substitute_vars("select ${a} from ${tab}", &[("a".into(), "1".into()), ("tab".into(), "clientes".into())]), "select 1 from clientes");
     }
 
     #[test]

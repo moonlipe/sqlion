@@ -40,6 +40,10 @@ pub struct App {
     pub demo: bool,
     pub git_cache: Option<(std::time::Instant, Vec<(String, String)>)>,
     pub last_scripts_dir: std::path::PathBuf,
+    /// window focus in the previous frame, to notice when the user comes back (after a `git pull`, for instance)
+    pub was_focused: bool,
+    /// time and content of the last write of `session.json`, to write at most every 2 s and only on change
+    pub session_saved: Option<(std::time::Instant, String)>,
 }
 
 pub fn setup_style(ctx: &egui::Context, dark: bool, size: f32) {
@@ -115,6 +119,20 @@ impl App {
             tabs.push(Tab { id: 1, kind: TabKind::Welcome });
             sh.next_id = 2;
         }
+        let mut restored_active = None;
+        if !demo {
+            if sh.store.prefs.restore_tabs {
+                if let Some(s) = crate::session::read(&session_path(&sh.store)) {
+                    let (kinds, a) = crate::session::restore(&s, &sh);
+                    if !kinds.is_empty() {
+                        tabs = kinds.into_iter().map(|kind| Tab { id: sh.fresh_id(), kind }).collect();
+                        restored_active = Some(a);
+                    }
+                }
+            } else {
+                let _ = std::fs::remove_file(session_path(&sh.store));
+            }
+        }
         let dark = sh.store.prefs.dark;
         let size = sh.store.prefs.font_size;
         crate::theme::install_fonts(&cc.egui_ctx);
@@ -141,7 +159,7 @@ impl App {
                 dialog = Some(Dialog::Conn { cfg: Box::new(c), is_new: true, msg: None, pass: String::new() });
             }
         }
-        let mut active = if demo && std::env::var("DBR_SLOW").is_err() { 1 } else { 0 };
+        let mut active = restored_active.unwrap_or(if demo && std::env::var("DBR_SLOW").is_err() { 1 } else { 0 });
         if demo && std::env::var("DBR_TAB").map(|v| v == "welcome").unwrap_or(false) {
             tabs.push(Tab { id: 9999, kind: TabKind::Welcome });
             active = tabs.len() - 1;
@@ -163,6 +181,8 @@ impl App {
             demo,
             git_cache: None,
             last_scripts_dir: std::path::PathBuf::new(),
+            was_focused: true,
+            session_saved: None,
         }
     }
 
@@ -376,15 +396,139 @@ impl App {
 
     /// Closes (without saving) the tabs that depend on a project that is about to be deleted.
     pub fn close_tabs_of_project(&mut self, project: &str) {
-        let keep: Vec<bool> = self.tabs.iter().map(|t| !self.tab_in_project(t, project)).collect();
-        let mut it = keep.into_iter();
-        self.tabs.retain(|_| it.next().unwrap_or(true));
+        let mask = self.project_tab_mask(project);
+        self.close_tabs_masked(mask);
+    }
+
+    /// One entry per tab: true when the tab depends on the project. Computed before the project leaves the store,
+    /// since afterwards its folder and connections can no longer be recognised.
+    pub fn project_tab_mask(&self, project: &str) -> Vec<bool> {
+        self.tabs.iter().map(|t| self.tab_in_project(t, project)).collect()
+    }
+
+    /// Rows changed in open transactions of the project's connections, when there is any.
+    pub fn project_pending_rows(&self, project: &str) -> Option<u64> {
+        let pending: Vec<u64> = self.sh.store.project_conn_ids(project).iter().filter_map(|c| self.sh.has_pending(c)).collect();
+        if pending.is_empty() {
+            None
+        } else {
+            Some(pending.iter().sum())
+        }
+    }
+
+    /// Rolls back the open transactions of the project's connections and drops their sessions, so that no
+    /// session is left behind holding a transaction (and its locks) after the project is closed.
+    pub fn end_project_sessions(&mut self, project: &str) {
+        for id in self.sh.store.project_conn_ids(project) {
+            if let Some(s) = self.sh.session(&id) {
+                if self.sh.has_pending(&id).is_some() {
+                    // a running job holds the lock; then dropping the session ends the transaction when the job ends
+                    if let Ok(mut g) = s.try_lock() {
+                        let _ = g.rollback();
+                    }
+                }
+                self.sh.disconnect(&id);
+            }
+        }
+    }
+
+    /// Keeps `session.json` up to date: at most every 2 s, and only when the tabs changed. With the preference
+    /// off, the file is deleted and nothing is kept.
+    pub fn autosave_session(&mut self, force: bool) {
+        if !self.sh.persist {
+            return;
+        }
+        if !force && self.session_saved.as_ref().map(|(t, _)| t.elapsed() < crate::session::SAVE_EVERY).unwrap_or(false) {
+            return;
+        }
+        let path = session_path(&self.sh.store);
+        if !self.sh.store.prefs.restore_tabs {
+            if self.session_saved.as_ref().map(|(_, j)| !j.is_empty()).unwrap_or(true) {
+                let _ = std::fs::remove_file(&path);
+            }
+            self.session_saved = Some((std::time::Instant::now(), String::new()));
+            return;
+        }
+        let json = crate::session::to_json(&crate::session::capture(&self.tabs, self.active));
+        if self.session_saved.as_ref().map(|(_, j)| j != &json).unwrap_or(true) {
+            let _ = crate::session::write(&path, &json);
+        }
+        self.session_saved = Some((std::time::Instant::now(), json));
+    }
+
+    /// Picks up changes made outside the app (a `git pull`, an editor): project files that changed are read
+    /// again, and script tabs without unsaved text take the new content of their file. Tabs with unsaved text
+    /// keep it.
+    pub fn refresh_from_disk(&mut self) {
+        let changed: Vec<String> = self.sh.store.projects.iter().map(|p| p.id.clone()).filter(|id| self.sh.store.project_changed_on_disk(id)).collect();
+        for id in changed {
+            let name = self.sh.store.projects.iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_default();
+            match self.sh.store.reload_project(&id) {
+                Ok(_) => self.toast(format!("Projeto “{}” recarregado do disco", name)),
+                Err(e) => self.toast(format!("Projeto “{}” mudou no disco, mas não pôde ser lido: {}", name, e)),
+            }
+        }
+        for t in self.tabs.iter_mut() {
+            if let TabKind::Sql(s) = &mut t.kind {
+                if s.dirty {
+                    continue;
+                }
+                if let Some(text) = s.file.as_ref().and_then(|f| std::fs::read_to_string(f).ok()) {
+                    if text != s.text {
+                        let n = text.chars().count();
+                        s.text = text;
+                        s.cursor = (s.cursor.0.min(n), s.cursor.1.min(n));
+                    }
+                }
+            }
+        }
+        self.git_cache = None;
+    }
+
+    /// Remove from the list: saves the project's scripts, closes its tabs and sessions; the folder stays on disk.
+    pub fn remove_project(&mut self, pid: &str) {
+        for i in 0..self.tabs.len() {
+            if self.tab_in_project(&self.tabs[i], pid) {
+                if let TabKind::Sql(sq) = &mut self.tabs[i].kind {
+                    if sq.dirty && !sq.text.trim().is_empty() {
+                        sq.save_file();
+                    }
+                }
+            }
+        }
+        self.close_tabs_of_project(pid);
+        self.end_project_sessions(pid);
+        self.sh.store.close_project(pid);
+        self.sh.save();
+    }
+
+    /// Deletes the project folder. Tabs are closed only once the folder is gone: when the safety checks refuse
+    /// or the deletion fails, the tabs (and their unsaved text) stay as they were.
+    pub fn delete_project(&mut self, pid: &str) -> Result<(), String> {
+        self.sh.store.check_project_deletable(pid)?;
+        let mask = self.project_tab_mask(pid);
+        // sessions go first: an open SQLite file inside the folder would keep it from being deleted on Windows
+        self.end_project_sessions(pid);
+        self.sh.store.delete_project_folder(pid)?;
+        self.close_tabs_masked(mask);
+        self.sh.save();
+        Ok(())
+    }
+
+    fn close_tabs_masked(&mut self, mask: Vec<bool>) {
+        let mut it = mask.into_iter();
+        self.tabs.retain(|_| !it.next().unwrap_or(false));
         crate::shared::release_memory();
         if self.tabs.is_empty() {
             self.active = 0;
         } else if self.active >= self.tabs.len() {
             self.active = self.tabs.len() - 1;
         }
+    }
+
+    /// Project of the current connection (or of the selected tree node); empty = the default project.
+    pub fn current_project_id(&self) -> String {
+        self.current_conn().and_then(|c| self.sh.cfg(&c).map(|x| x.project.clone())).unwrap_or_default()
     }
 
     pub fn current_conn(&self) -> Option<String> {
@@ -511,6 +655,15 @@ impl App {
                 }
                 if ui.button("Abrir projeto…").clicked() {
                     self.dialog = Some(Dialog::OpenProject { dir: String::new(), msg: None });
+                    ui.close();
+                }
+                if ui.button("Exportar projeto (.sqlion)…").clicked() {
+                    let p = self.current_project_id();
+                    self.open_export_dialog(&p);
+                    ui.close();
+                }
+                if ui.button("Importar projeto (.sqlion)…").clicked() {
+                    self.open_import_dialog();
                     ui.close();
                 }
                 if ui.add(egui::Button::new("Novo script SQL").shortcut_text("Ctrl+]")).clicked() {
@@ -1238,6 +1391,10 @@ impl App {
             self.dialog = Some(Dialog::Folder { project: pid.clone(), old: None, name: String::new(), msg: None });
             ui.close();
         }
+        if ui.button("Exportar (.sqlion)…").clicked() {
+            self.open_export_dialog(&pid);
+            ui.close();
+        }
         if let Some(p) = p {
             if ui.button("Versionamento (git)…").clicked() {
                 self.open_git_dialog_for(p.dir());
@@ -1258,18 +1415,10 @@ impl App {
         let remove = ui.add_enabled(!is_default, egui::Button::new("Remover da lista"));
         let remove = if is_default { remove.on_disabled_hover_text(why_default) } else { remove.on_hover_text("Fecha o projeto; a pasta continua no disco") };
         if remove.clicked() {
-            for i in 0..self.tabs.len() {
-                if self.tab_in_project(&self.tabs[i], &pid) {
-                    if let TabKind::Sql(sq) = &mut self.tabs[i].kind {
-                        if sq.dirty && !sq.text.trim().is_empty() {
-                            sq.save_file();
-                        }
-                    }
-                }
+            match self.project_pending_rows(&pid) {
+                Some(rows) => self.dialog = Some(Dialog::RemoveProject { id: pid.clone(), rows }),
+                None => self.remove_project(&pid),
             }
-            self.close_tabs_of_project(&pid);
-            self.sh.store.close_project(&pid);
-            self.sh.save();
             ui.close();
         }
         let del = ui.add_enabled(!is_default, egui::Button::new("Excluir a pasta…"));
@@ -1756,6 +1905,13 @@ impl App {
 
     fn frame_logic(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         self.frames += 1;
+        let focused = ctx.input(|i| i.focused);
+        if focused && !self.was_focused {
+            self.refresh_from_disk();
+        }
+        self.was_focused = focused;
+        self.autosave_session(false);
+        self.sh.poll_meta();
         let want = (self.sh.store.prefs.dark, self.sh.store.prefs.font_size);
         if self.applied_theme != Some(want) {
             setup_style(ctx, want.0, want.1);
@@ -1940,7 +2096,14 @@ impl eframe::App for App {
 
 impl Drop for App {
     fn drop(&mut self) {
+        self.autosave_session(true);
+        // with the tabs restored next time, unsaved text stays unsaved (in the session) instead of being
+        // written over the script file; without restoring, it is written so that nothing is lost
+        let keep_unsaved = self.sh.persist && self.sh.store.prefs.restore_tabs;
         for t in &mut self.tabs {
+            if keep_unsaved {
+                break;
+            }
             if let TabKind::Sql(s) = &mut t.kind {
                 if s.dirty && !s.text.trim().is_empty() {
                     s.save_file();
@@ -1949,6 +2112,11 @@ impl Drop for App {
         }
         self.sh.save();
     }
+}
+
+/// `session.json` lives next to `workspace.json` (the configuration folder).
+fn session_path(store: &Store) -> std::path::PathBuf {
+    store.path.as_ref().and_then(|p| p.parent()).map(|d| d.join("session.json")).unwrap_or_else(crate::session::path)
 }
 
 fn text_is_empty_marker(t: &str) -> bool {
@@ -2104,5 +2272,249 @@ mod dnd_tests {
         frame(vec![btn(false)], &mut got, &mut rows);
         frame(vec![], &mut got, &mut rows);
         assert_eq!(got.as_deref(), Some("c1"));
+    }
+}
+
+#[cfg(test)]
+mod project_close_tests {
+    use super::App;
+    use crate::db::{ConnConfig, Kind, TxMode};
+    use crate::shared::{spawn_job, JobMsg, JobStmt, Shared};
+    use crate::store::Store;
+    use crate::tabs::{SqlTab, Tab, TabKind};
+
+    fn app() -> App {
+        App {
+            sh: Shared::new(Store::memory(), false, egui::Context::default()),
+            tabs: vec![],
+            active: 0,
+            dialog: None,
+            nav_filter: String::new(),
+            nav_sel: None,
+            screenshot: None,
+            frames: 0,
+            shot_requested: false,
+            toast: None,
+            applied_theme: None,
+            scripts_dir: std::env::temp_dir(),
+            nav_w: 200.0,
+            demo: true,
+            git_cache: None,
+            last_scripts_dir: std::env::temp_dir(),
+            was_focused: true,
+            session_saved: None,
+        }
+    }
+
+    fn base(tag: &str) -> std::path::PathBuf {
+        let b = std::env::temp_dir().join(format!("dbr-test-{}-{}", tag, crate::store::new_project_id()));
+        std::fs::create_dir_all(&b).unwrap();
+        b
+    }
+
+    /// A project with one unsaved script tab whose file lives in the project folder.
+    fn project_with_dirty_tab(a: &mut App, dir: &std::path::Path) -> String {
+        let p = a.sh.store.create_project("Apagar", dir).unwrap();
+        let file = p.scripts_dir().join("s.sql");
+        std::fs::write(&file, "select 1").unwrap();
+        let mut t = SqlTab::new(None, "select 2 -- não gravado".into(), "s.sql".into());
+        t.file = Some(file);
+        t.dirty = true;
+        a.tabs.push(Tab { id: 1, kind: TabKind::Sql(Box::new(t)) });
+        p.id
+    }
+
+    fn dirty_text(a: &App) -> Option<String> {
+        a.tabs.iter().find_map(|t| match &t.kind {
+            TabKind::Sql(s) if s.dirty => Some(s.text.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn coming_back_reloads_clean_script_tabs_and_keeps_unsaved_ones() {
+        let b = base("focus");
+        let mut a = app();
+        let p = a.sh.store.create_project("Foco", &b.join("p")).unwrap();
+        let (clean, dirty) = (p.scripts_dir().join("limpo.sql"), p.scripts_dir().join("sujo.sql"));
+        std::fs::write(&clean, "select 1").unwrap();
+        std::fs::write(&dirty, "select 1").unwrap();
+        for (i, (f, text, d)) in [(&clean, "select 1", false), (&dirty, "select 2 -- não gravado", true)].into_iter().enumerate() {
+            let mut t = SqlTab::new(None, text.into(), "s".into());
+            t.file = Some(f.clone());
+            t.dirty = d;
+            t.cursor = (8, 8);
+            a.tabs.push(Tab { id: i as u64 + 1, kind: TabKind::Sql(Box::new(t)) });
+        }
+        // a `git pull` changes both files and renames the project
+        std::fs::write(&clean, "sel").unwrap();
+        std::fs::write(&dirty, "select 3").unwrap();
+        let file = p.file();
+        let changed = std::fs::read_to_string(&file).unwrap().replace("\"Foco\"", "\"Foco do repositório\"");
+        std::fs::write(&file, changed).unwrap();
+        a.refresh_from_disk();
+        let texts: Vec<(String, bool, (usize, usize))> = a.tabs.iter().filter_map(|t| match &t.kind {
+            TabKind::Sql(s) => Some((s.text.clone(), s.dirty, s.cursor)),
+            _ => None,
+        }).collect();
+        assert_eq!(texts[0], ("sel".to_string(), false, (3, 3)), "the clean tab takes the new text, cursor kept inside it");
+        assert_eq!(texts[1], ("select 2 -- não gravado".to_string(), true, (8, 8)), "unsaved text survives");
+        assert_eq!(a.sh.store.projects[0].name, "Foco do repositório");
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    /// An app that persists into a temporary configuration folder.
+    fn persisting_app(dir: &std::path::Path) -> App {
+        let mut a = app();
+        let mut store = Store::memory();
+        store.path = Some(dir.join("workspace.json"));
+        a.sh = Shared::new(store, true, egui::Context::default());
+        a
+    }
+
+    #[test]
+    fn session_is_kept_only_while_the_preference_is_on() {
+        let b = base("restorepref");
+        let f = b.join("session.json");
+        let mut a = persisting_app(&b);
+        a.tabs.push(Tab { id: 1, kind: TabKind::Welcome });
+        a.autosave_session(true);
+        assert!(f.is_file(), "on by default: the tabs are kept");
+        a.sh.store.prefs.restore_tabs = false;
+        a.autosave_session(true);
+        assert!(!f.exists(), "turning it off deletes the file");
+        a.tabs.push(Tab { id: 2, kind: TabKind::Welcome });
+        a.autosave_session(true);
+        assert!(!f.exists(), "and nothing is kept while it is off");
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn closing_the_app_keeps_unsaved_text_in_the_session_not_in_the_file() {
+        for restore in [true, false] {
+            let b = base("exit");
+            let script = b.join("s.sql");
+            std::fs::write(&script, "select 1").unwrap();
+            let mut a = persisting_app(&b);
+            a.sh.store.prefs.restore_tabs = restore;
+            let mut t = SqlTab::new(None, "select 2 -- não gravado".into(), "s".into());
+            t.file = Some(script.clone());
+            t.dirty = true;
+            a.tabs.push(Tab { id: 1, kind: TabKind::Sql(Box::new(t)) });
+            drop(a);
+            let on_disk = std::fs::read_to_string(&script).unwrap();
+            if restore {
+                assert_eq!(on_disk, "select 1", "the file keeps its saved text");
+                let s = crate::session::read(&b.join("session.json")).expect("the session was written on exit");
+                assert!(matches!(&s.tabs[0], crate::session::SavedTab::Sql { text, dirty: true, .. } if text == "select 2 -- não gravado"));
+            } else {
+                assert_eq!(on_disk, "select 2 -- não gravado", "without restoring, unsaved text is written on exit as before");
+                assert!(!b.join("session.json").exists());
+            }
+            let _ = std::fs::remove_dir_all(&b);
+        }
+    }
+
+    #[test]
+    fn refused_deletion_keeps_the_tabs_and_their_unsaved_text() {
+        let b = base("delrefused");
+        let mut a = app();
+        let pid = project_with_dirty_tab(&mut a, &b.join("p"));
+        // without the project file the safety checks refuse the deletion
+        std::fs::remove_file(b.join("p").join("sqlion-project.json")).unwrap();
+        assert!(a.delete_project(&pid).is_err());
+        assert_eq!(a.tabs.len(), 1, "the tab stays open");
+        assert_eq!(dirty_text(&a).as_deref(), Some("select 2 -- não gravado"));
+        assert!(b.join("p").is_dir(), "nothing was deleted");
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_deletion_keeps_the_tabs_and_their_unsaved_text() {
+        use std::os::unix::fs::PermissionsExt;
+        let b = base("delfails");
+        let mut a = app();
+        let dir = b.join("p");
+        let pid = project_with_dirty_tab(&mut a, &dir);
+        // a folder whose entries cannot be removed: the deletion fails part way
+        let scripts = dir.join("scripts");
+        std::fs::set_permissions(&scripts, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let r = a.delete_project(&pid);
+        std::fs::set_permissions(&scripts, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if r.is_ok() {
+            // running as root ignores the permission; the failure cannot be produced here
+            let _ = std::fs::remove_dir_all(&b);
+            return;
+        }
+        assert_eq!(a.tabs.len(), 1, "the tab stays open");
+        assert_eq!(dirty_text(&a).as_deref(), Some("select 2 -- não gravado"));
+        assert!(a.sh.store.projects.iter().any(|p| p.id == pid), "the project stays in the list");
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn successful_deletion_closes_the_tabs() {
+        let b = base("delok");
+        let mut a = app();
+        let pid = project_with_dirty_tab(&mut a, &b.join("p"));
+        a.delete_project(&pid).unwrap();
+        assert!(a.tabs.is_empty());
+        assert!(!b.join("p").exists());
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    /// A project with a SQLite connection in Manual mode holding an uncommitted UPDATE.
+    fn project_with_pending(a: &mut App, b: &std::path::Path) -> (String, String, std::path::PathBuf) {
+        let p = a.sh.store.create_project("Pendente", &b.join("p")).unwrap();
+        let db = b.join("banco.sqlite");
+        crate::sample::create(&db).unwrap();
+        let mut c = ConnConfig::new(Kind::Sqlite);
+        c.database = db.to_string_lossy().to_string();
+        c.set_mode(TxMode::Manual);
+        c.project = p.id.clone();
+        let id = c.id.clone();
+        a.sh.store.connections.push(c);
+        a.sh.connect(&id).unwrap();
+        let job = spawn_job(a.sh.session(&id).unwrap(), vec![JobStmt { sql: "UPDATE products SET name = 'alterado' WHERE product_id = 1".into(), limit: 200, offset: 0, tag: 0 }], egui::Context::default());
+        while !matches!(job.rx.recv().unwrap(), JobMsg::Finished) {}
+        assert_eq!(a.sh.has_pending(&id), Some(1));
+        assert_eq!(a.project_pending_rows(&p.id), Some(1));
+        (p.id, id, db)
+    }
+
+    fn name_of_product_1(db: &std::path::Path) -> String {
+        let mut c = ConnConfig::new(Kind::Sqlite);
+        c.database = db.to_string_lossy().to_string();
+        let mut sh = Shared::new(Store::memory(), false, egui::Context::default());
+        let id = c.id.clone();
+        sh.store.connections.push(c);
+        sh.connect(&id).unwrap();
+        let s = sh.session(&id).unwrap();
+        let r = s.lock().unwrap().run("SELECT name FROM products WHERE product_id = 1", 10, 0).unwrap();
+        r.rows[0][0].clone().unwrap_or_default()
+    }
+
+    #[test]
+    fn removing_a_project_rolls_back_and_drops_its_sessions() {
+        let b = base("rmpending");
+        let mut a = app();
+        let (pid, id, db) = project_with_pending(&mut a, &b);
+        a.remove_project(&pid);
+        assert!(a.sh.session(&id).is_none(), "no session is left behind");
+        assert_ne!(name_of_product_1(&db), "alterado", "the pending change was rolled back");
+        assert!(b.join("p").join("sqlion-project.json").is_file(), "the folder stays");
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn deleting_a_project_rolls_back_and_drops_its_sessions() {
+        let b = base("delpending");
+        let mut a = app();
+        let (pid, id, db) = project_with_pending(&mut a, &b);
+        a.delete_project(&pid).unwrap();
+        assert!(a.sh.session(&id).is_none(), "no session is left behind");
+        assert_ne!(name_of_product_1(&db), "alterado", "the pending change was rolled back");
+        let _ = std::fs::remove_dir_all(&b);
     }
 }

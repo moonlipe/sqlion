@@ -1,6 +1,8 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod bundle;
+mod bundle_dialogs;
 mod icons;
 mod theme;
 mod constants;
@@ -13,6 +15,7 @@ mod export;
 mod git;
 mod grid;
 mod sample;
+mod session;
 mod sqltext;
 mod store;
 #[cfg(test)]

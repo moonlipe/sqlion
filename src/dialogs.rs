@@ -28,6 +28,9 @@ pub enum Dialog {
     ConfirmAutoCommit { conn: String, stmts: usize, rows: u64, dont_ask: bool },
     RenameProject { id: String, name: String, msg: Option<String> },
     DeleteProject { id: String, msg: Option<String> },
+    RemoveProject { id: String, rows: u64 },
+    ExportBundle(Box<crate::bundle_dialogs::ExportState>),
+    ImportBundle(Box<crate::bundle_dialogs::ImportState>),
     RenameScript { path: std::path::PathBuf, name: String, msg: Option<String> },
     DeleteScript(std::path::PathBuf),
     About,
@@ -88,7 +91,7 @@ impl App {
             }
             Req::DeleteConn(id) => self.dialog = Some(Dialog::ConfirmDelete(id)),
             Req::Params { tab, names, stmts, new_tab } => {
-                let vals = names.iter().map(|n| self.sh.vars.iter().find(|(k, _)| k == n).map(|x| x.1.clone()).unwrap_or_default()).collect();
+                let vals = names.iter().map(|n| self.sh.param_vals.iter().find(|(k, _)| k == n).map(|x| x.1.clone()).unwrap_or_default()).collect();
                 self.dialog = Some(Dialog::Params { tab, names, vals, stmts, new_tab });
             }
             Req::ConfirmRun { tab, stmts, new_tab, env } => self.dialog = Some(Dialog::ConfirmRun { tab, stmts, new_tab, env }),
@@ -455,7 +458,7 @@ impl App {
                 win(ctx, "Vincular parâmetros").collapsible(false).show(ctx, |ui| {
                     egui::Grid::new("par_grid").num_columns(2).show(ui, |ui| {
                         for (n, v) in names.iter().zip(vals.iter_mut()) {
-                            ui.label(format!(":{}", n));
+                            ui.label(if n.starts_with("${") { n.clone() } else { format!(":{}", n) });
                             ui.add(egui::TextEdit::singleline(v).desired_width(220.0));
                             ui.end_row();
                         }
@@ -464,10 +467,14 @@ impl App {
                         if ui.button("OK").clicked() {
                             let pairs: Vec<(String, String)> = names.iter().cloned().zip(vals.iter().cloned()).collect();
                             for (k, v) in &pairs {
-                                self.sh.vars.retain(|(n, _)| n != k);
-                                self.sh.vars.push((k.clone(), v.clone()));
+                                // remembered only to fill the dialog next time: they do not become @set variables
+                                self.sh.param_vals.retain(|(n, _)| n != k);
+                                self.sh.param_vals.push((k.clone(), v.clone()));
                             }
-                            let final_stmts: Vec<String> = stmts.iter().map(|s| crate::sqltext::substitute_params(s, &pairs)).collect();
+                            let (vars, params): (Vec<(String, String)>, Vec<(String, String)>) = pairs.into_iter().partition(|(k, _)| k.starts_with("${"));
+                            // a variable is text put in the SQL as typed; a parameter becomes a literal
+                            let vars: Vec<(String, String)> = vars.into_iter().map(|(k, v)| (k[2..k.len() - 1].to_string(), v)).collect();
+                            let final_stmts: Vec<String> = stmts.iter().map(|s| crate::sqltext::substitute_params(&crate::sqltext::substitute_vars(s, &vars), &params)).collect();
                             let nt = *new_tab;
                             let tid = *tab;
                             if let Some(i) = self.tabs.iter().position(|t| t.id == tid) {
@@ -553,6 +560,18 @@ impl App {
                             }
                         }
                     });
+                    if *avail {
+                        let missing = crate::git::missing_ignores(&dir);
+                        if !missing.is_empty() {
+                            ui.add_space(4.0);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(egui::RichText::new(format!("O .gitignore não exclui os arquivos locais ({}).", missing.join(", "))).small().weak());
+                                if ui.small_button("Criar .gitignore sugerido").clicked() {
+                                    action = Some(4);
+                                }
+                            });
+                        }
+                    }
                     if *repo {
                         ui.add_space(6.0);
                         ui.label("Mensagem do commit");
@@ -574,6 +593,7 @@ impl App {
                         0 => crate::git::init(&dir),
                         1 => crate::git::status(&dir),
                         2 => crate::git::log(&dir),
+                        4 => crate::git::write_suggested_ignore(&dir),
                         _ => crate::git::commit_all(&dir, msg),
                     };
                     *output = out.text;
@@ -808,6 +828,7 @@ impl App {
                     TabKind::Table(tt) => tt.grid.as_ref().map(|g| g.pending_changes() > 0).unwrap_or(false),
                     _ => false,
                 });
+                let pending = self.project_pending_rows(id);
                 win(ctx, "Excluir a pasta do projeto").collapsible(false).show(ctx, |ui| {
                     match &proj {
                         Some(p) => {
@@ -820,6 +841,9 @@ impl App {
                     }
                     if unsaved {
                         ui.colored_label(egui::Color32::from_rgb(220, 150, 40), "Há abas deste projeto com alterações não gravadas; elas serão perdidas.");
+                    }
+                    if let Some(rows) = pending {
+                        ui.add(egui::Label::new(egui::RichText::new(format!("Há {} registro(s) alterado(s) em transações abertas nas conexões deste projeto; elas serão desfeitas (rollback).", rows)).color(egui::Color32::from_rgb(220, 150, 40))).wrap());
                     }
                     if let Some(m) = msg.as_ref() {
                         ui.colored_label(egui::Color32::from_rgb(210, 60, 60), m.as_str());
@@ -835,14 +859,34 @@ impl App {
                 });
                 if msg.as_deref() == Some("") {
                     *msg = None;
-                    self.close_tabs_of_project(id);
-                    match self.sh.store.delete_project_folder(id) {
-                        Ok(_) => {
-                            self.sh.save();
-                            keep = false;
-                        }
+                    let pid = id.clone();
+                    match self.delete_project(&pid) {
+                        Ok(_) => keep = false,
                         Err(e) => *msg = Some(e),
                     }
+                }
+            }
+            Dialog::ExportBundle(st) => keep = self.export_bundle_dialog(ctx, st),
+            Dialog::ImportBundle(st) => keep = self.import_bundle_dialog(ctx, st),
+            Dialog::RemoveProject { id, rows } => {
+                let name = self.sh.store.projects.iter().find(|p| &p.id == id).map(|p| p.name.clone()).unwrap_or_default();
+                let mut confirm = false;
+                win(ctx, "Remover o projeto da lista").collapsible(false).show(ctx, |ui| {
+                    ui.add(egui::Label::new(format!("Remover “{}” da lista? A pasta continua no disco e pode ser aberta de novo.", name)).wrap());
+                    ui.add(egui::Label::new(egui::RichText::new(format!("Há {} registro(s) alterado(s) em transações abertas nas conexões deste projeto; elas serão desfeitas (rollback).", rows)).color(egui::Color32::from_rgb(220, 150, 40))).wrap());
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancelar").clicked() {
+                            keep = false;
+                        }
+                        if ui.button("Remover da lista").clicked() {
+                            confirm = true;
+                        }
+                    });
+                });
+                if confirm {
+                    let pid = id.clone();
+                    self.remove_project(&pid);
+                    keep = false;
                 }
             }
             Dialog::DeleteScript(path) => {
@@ -916,6 +960,9 @@ impl App {
                         let mut dd = p.history_days;
                         ui.add(egui::DragValue::new(&mut dd).range(1..=3650));
                         p.history_days = dd;
+                        ui.end_row();
+                        ui.label("Reabrir as abas da última sessão");
+                        ui.checkbox(&mut p.restore_tabs, "").on_hover_text("Com isso ligado, as abas voltam como estavam, inclusive o texto não gravado dos scripts. Desligado, o estado das abas não é guardado.");
                         ui.end_row();
                         ui.label("Pasta dos scripts");
                         ui.horizontal(|ui| {
@@ -1148,7 +1195,7 @@ fn do_import(sh: &mut Shared, conn: &str, schema: &str, table: &str, path: &str,
 }
 
 /// Every dialog is built here: it opens centered, then can be dragged by its title and resized from its edges.
-fn win<'a>(ctx: &egui::Context, title: impl Into<egui::WidgetText>) -> egui::Window<'a> {
+pub(crate) fn win<'a>(ctx: &egui::Context, title: impl Into<egui::WidgetText>) -> egui::Window<'a> {
     egui::Window::new(title).default_pos(ctx.content_rect().center()).pivot(egui::Align2::CENTER_CENTER).resizable(true).collapsible(false).constrain(true)
 }
 

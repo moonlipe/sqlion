@@ -160,8 +160,40 @@ pub struct Shared {
     pub status: String,
     pub requests: Vec<Req>,
     pub vars: Vec<(String, String)>,
+    /// last values typed in the parameter dialog (`:name` and `${name}`), to fill it next time
+    pub param_vals: Vec<(String, String)>,
     pub next_id: u64,
     pub ctx: egui::Context,
+    /// metadata loaded in the background (for autocomplete), so that typing never waits for the database
+    pub meta_tx: std::sync::mpsc::Sender<MetaMsg>,
+    pub meta_rx: std::sync::mpsc::Receiver<MetaMsg>,
+    pub meta_loading: std::collections::HashSet<String>,
+    /// bumped whenever background metadata arrives
+    pub meta_gen: u64,
+}
+
+pub enum MetaData {
+    Schemas(Vec<String>),
+    Tables(String, Vec<(String, bool)>),
+    TMeta(String, String, TableMeta),
+    Failed,
+}
+
+pub struct MetaMsg {
+    pub key: String,
+    pub conn: String,
+    pub data: MetaData,
+}
+
+/// The schema a connection works in when the SQL does not name one.
+fn pick_default_schema(kind: Kind, cfg_db: &str, sch: &[String]) -> String {
+    match kind {
+        Kind::Sqlite => "main".into(),
+        Kind::Postgres if sch.iter().any(|s| s == "public") => "public".into(),
+        Kind::SqlServer if sch.iter().any(|s| s == "dbo") => "dbo".into(),
+        Kind::Mongo | Kind::Mysql if !cfg_db.is_empty() => cfg_db.to_string(),
+        _ => sch.first().cloned().unwrap_or_default(),
+    }
 }
 
 impl Shared {
@@ -181,9 +213,97 @@ impl Shared {
             status: "Pronto".into(),
             requests: Vec::new(),
             vars: Vec::new(),
+            param_vals: Vec::new(),
             next_id: 1,
             ctx,
+            meta_tx: std::sync::mpsc::channel().0,
+            meta_rx: std::sync::mpsc::channel().1,
+            meta_loading: Default::default(),
+            meta_gen: 0,
         }
+        .with_meta_channel()
+    }
+
+    fn with_meta_channel(mut self) -> Shared {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.meta_tx = tx;
+        self.meta_rx = rx;
+        self
+    }
+
+    /// Loads metadata on a thread of its own; the result lands in the caches through `poll_meta`.
+    fn bg_load(&mut self, key: String, conn: &str, f: impl FnOnce(&mut Session) -> Option<MetaData> + Send + 'static) {
+        if self.meta_loading.contains(&key) {
+            return;
+        }
+        let Some(sess) = self.session(conn) else { return };
+        self.meta_loading.insert(key.clone());
+        let (tx, ctx, conn) = (self.meta_tx.clone(), self.ctx.clone(), conn.to_string());
+        std::thread::spawn(move || {
+            let data = {
+                let mut g = sess.lock().unwrap_or_else(|e| e.into_inner());
+                f(&mut g)
+            };
+            let _ = tx.send(MetaMsg { key, conn, data: data.unwrap_or(MetaData::Failed) });
+            ctx.request_repaint();
+        });
+    }
+
+    /// Moves the metadata loaded in the background into the caches.
+    pub fn poll_meta(&mut self) {
+        while let Ok(m) = self.meta_rx.try_recv() {
+            self.meta_loading.remove(&m.key);
+            self.meta_gen += 1;
+            if !self.sessions.contains_key(&m.conn) {
+                continue; // disconnected meanwhile: its caches were cleared on purpose
+            }
+            match m.data {
+                MetaData::Schemas(v) => {
+                    self.schemas.entry(m.conn).or_insert(v);
+                }
+                MetaData::Tables(schema, v) => {
+                    self.tables.entry((m.conn, schema)).or_insert(v);
+                }
+                MetaData::TMeta(schema, table, v) => {
+                    self.tmeta.entry((m.conn, schema, table)).or_insert(v);
+                }
+                MetaData::Failed => {}
+            }
+        }
+    }
+
+    /// Default schema from the cache; when the schemas are not known yet they are requested and None is returned.
+    pub fn cached_default_schema(&mut self, id: &str) -> Option<String> {
+        let cfg_db = self.cfg(id).map(|c| c.database.clone()).unwrap_or_default();
+        let kind = self.kind(id);
+        if kind == Kind::Sqlite || (matches!(kind, Kind::Mongo | Kind::Mysql) && !cfg_db.is_empty()) {
+            return Some(pick_default_schema(kind, &cfg_db, &[]));
+        }
+        if let Some(sch) = self.schemas.get(id) {
+            return Some(pick_default_schema(kind, &cfg_db, sch));
+        }
+        self.bg_load(format!("s|{}", id), id, |s| s.schemas().ok().map(MetaData::Schemas));
+        None
+    }
+
+    /// True when the tables of the schema are cached; otherwise they are requested in the background.
+    pub fn want_tables(&mut self, id: &str, schema: &str) -> bool {
+        if self.tables.contains_key(&(id.to_string(), schema.to_string())) {
+            return true;
+        }
+        let sc = schema.to_string();
+        self.bg_load(format!("t|{}|{}", id, schema), id, move |s| s.tables(&sc).ok().map(|v| MetaData::Tables(sc, v)));
+        false
+    }
+
+    /// True when the metadata of the table is cached; otherwise it is requested in the background.
+    pub fn want_tmeta(&mut self, id: &str, schema: &str, table: &str) -> bool {
+        if self.tmeta.contains_key(&(id.to_string(), schema.to_string(), table.to_string())) {
+            return true;
+        }
+        let (sc, tb) = (schema.to_string(), table.to_string());
+        self.bg_load(format!("m|{}|{}|{}", id, schema, table), id, move |s| s.table_meta(&sc, &tb).ok().map(|v| MetaData::TMeta(sc, tb, v)));
+        false
     }
 
     pub fn save(&self) {
@@ -353,37 +473,7 @@ impl Shared {
         let cfg_db = self.cfg(id).map(|c| c.database.clone()).unwrap_or_default();
         let kind = self.kind(id);
         let sch = self.ensure_schemas(id);
-        match kind {
-            Kind::Sqlite => "main".into(),
-            Kind::Postgres => {
-                if sch.iter().any(|s| s == "public") {
-                    "public".into()
-                } else {
-                    sch.first().cloned().unwrap_or_default()
-                }
-            }
-            Kind::SqlServer => {
-                if sch.iter().any(|s| s == "dbo") {
-                    "dbo".into()
-                } else {
-                    sch.first().cloned().unwrap_or_default()
-                }
-            }
-            Kind::Mongo => {
-                if !cfg_db.is_empty() {
-                    cfg_db
-                } else {
-                    sch.first().cloned().unwrap_or_default()
-                }
-            }
-            Kind::Mysql => {
-                if !cfg_db.is_empty() {
-                    cfg_db
-                } else {
-                    sch.first().cloned().unwrap_or_default()
-                }
-            }
-        }
+        pick_default_schema(kind, &cfg_db, &sch)
     }
 
     pub fn qualified(&self, id: &str, schema: &str, table: &str) -> String {

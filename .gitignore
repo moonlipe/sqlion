@@ -19,3 +19,8 @@
 # profiling / ferramentas
 perf.data*
 flamegraph.svg
+
+# Agents
+.rtk/
+.claude/
+.opencode/

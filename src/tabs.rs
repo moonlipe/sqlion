@@ -146,6 +146,13 @@ pub struct SqlTab {
     pub save_confirmed: bool,
     pub new_script: bool,
     pub typed_pair: Option<usize>,
+    /// autocomplete waiting for metadata loaded in the background: (generation asked at, cursor)
+    pub ac_wait: Option<(u64, usize)>,
+    /// vertical scroll of the editor; Some in `set_scroll` restores it on the next frame
+    pub scroll_y: f32,
+    pub set_scroll: Option<f32>,
+    /// give the keyboard to the editor on the next frame (a tab restored with its cursor)
+    pub focus_editor: bool,
 }
 
 impl SqlTab {
@@ -173,6 +180,10 @@ impl SqlTab {
             save_confirmed: false,
             new_script: false,
             typed_pair: None,
+            ac_wait: None,
+            scroll_y: 0.0,
+            set_scroll: None,
+            focus_editor: false,
         }
     }
 
@@ -241,15 +252,27 @@ impl SqlTab {
         if real.is_empty() {
             return;
         }
-        if sh.store.prefs.params_enabled {
-            let mut names = Vec::new();
-            for s in &real {
+        // values asked for before running: `:name` parameters and `${name}` variables not defined by @set
+        // (variables appear in the list as "${name}")
+        let mut names = Vec::new();
+        for s in &real {
+            if sh.store.prefs.vars_enabled {
+                for n in sqltext::find_vars(s) {
+                    let n = format!("${{{}}}", n);
+                    if !names.contains(&n) {
+                        names.push(n);
+                    }
+                }
+            }
+            if sh.store.prefs.params_enabled {
                 for n in sqltext::find_params(s) {
                     if !names.contains(&n) {
                         names.push(n);
                     }
                 }
             }
+        }
+        {
             if !names.is_empty() {
                 self.pending_params = Some(names.clone());
                 sh.req(Req::Params { tab: tab_id, names, stmts: real, new_tab });
@@ -638,12 +661,20 @@ impl SqlTab {
         self.text.replace_range(a..b, &ins);
         self.set_cursor = Some(start_char + ins.chars().count());
         self.ac = None;
+        self.ac_wait = None;
         self.dirty = true;
     }
 
     fn start_complete(&mut self, sh: &mut Shared) {
         let cur = byte_of_char(&self.text, self.cursor.0);
-        self.ac = complete(sh, self.conn.as_deref(), &self.text, cur);
+        let (ac, waiting) = complete(sh, self.conn.as_deref(), &self.text, cur);
+        // keep the selection when the list is refreshed with metadata that just arrived
+        let sel = self.ac.as_ref().filter(|_| self.ac_wait.is_some()).map(|a| a.sel).unwrap_or(0);
+        self.ac = ac.map(|mut a| {
+            a.sel = sel.min(a.items.len().saturating_sub(1));
+            a
+        });
+        self.ac_wait = waiting.then_some((sh.meta_gen, self.cursor.0));
     }
 
     pub fn show(&mut self, ui: &mut Ui, sh: &mut Shared, tab_id: u64, dark: bool) {
@@ -670,6 +701,13 @@ impl SqlTab {
 
     fn show_editor(&mut self, ui: &mut Ui, sh: &mut Shared, dark: bool, tab_id: u64) {
         let size = sh.store.prefs.font_size;
+        if let Some((gen, at)) = self.ac_wait {
+            if self.cursor.0 != at || self.cursor.0 != self.cursor.1 {
+                self.ac_wait = None;
+            } else if sh.meta_gen != gen {
+                self.start_complete(sh);
+            }
+        }
         // autocomplete key handling (before the editor sees the keys)
         let mut accept: Option<String> = None;
         if let Some(ac) = &mut self.ac {
@@ -687,6 +725,7 @@ impl SqlTab {
             });
             if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
                 self.ac = None;
+        self.ac_wait = None;
             }
         }
         if let Some(item) = accept {
@@ -696,12 +735,16 @@ impl SqlTab {
         }
 
         // auto-close quotes and brackets (SQLEDITOR_CLOSE_SINGLE_QUOTES / DOUBLE_QUOTES / BRACKETS = true)
+        let mut pair_cursor: Option<usize> = None;
         if crate::constants::AUTO_CLOSE_PAIRS && self.cursor.0 == self.cursor.1 && self.ac.is_none() {
             let cur_b = byte_of_char(&self.text, self.cursor.0);
             let next = self.text[cur_b..].chars().next();
             let prev = self.text[..cur_b].chars().next_back();
             let mut skip = false;
             let mut pair = false;
+            // a pair is closed only before a blank, a closing bracket or a separator: typing "(" in front of a word
+            // (to wrap it) inserts the bracket alone
+            let pair_ok = next.map(|c| c.is_whitespace() || ")]};,".contains(c)).unwrap_or(true);
             ui.input_mut(|i| {
                 for ev in i.events.iter_mut() {
                     if let egui::Event::Text(tx) = ev {
@@ -716,19 +759,19 @@ impl SqlTab {
                                 tx.clear();
                                 skip = true;
                             }
-                            '(' => {
+                            '(' if pair_ok => {
                                 *tx = "()".into();
                                 pair = true;
                             }
-                            '[' => {
+                            '[' if pair_ok => {
                                 *tx = "[]".into();
                                 pair = true;
                             }
-                            '{' => {
+                            '{' if pair_ok => {
                                 *tx = "{}".into();
                                 pair = true;
                             }
-                            '\'' | '"' if !prev.map(|p| p.is_alphanumeric()).unwrap_or(false) => {
+                            '\'' | '"' if pair_ok && !prev.map(|p| p.is_alphanumeric()).unwrap_or(false) => {
                                 *tx = format!("{}{}", ch, ch);
                                 pair = true;
                             }
@@ -738,13 +781,22 @@ impl SqlTab {
                     }
                 }
             });
-            if skip || pair {
+            if skip {
+                // nothing is inserted: the cursor just steps over the closing character
                 self.set_cursor = Some(self.cursor.0 + 1);
+            }
+            if pair {
+                // the editor inserts both characters at the cursor; it goes back between them afterwards
+                pair_cursor = Some(self.cursor.0 + 1);
             }
         }
 
         let editor_h = ui.available_height();
-        egui::ScrollArea::vertical().id_salt(("sql_scroll", tab_id)).auto_shrink([false, false]).show(ui, |ui| {
+        let mut area = egui::ScrollArea::vertical().id_salt(("sql_scroll", tab_id)).auto_shrink([false, false]);
+        if let Some(y) = self.set_scroll.take() {
+            area = area.vertical_scroll_offset(y);
+        }
+        let scrolled = area.show(ui, |ui| {
             let mut layouter = |ui: &Ui, text: &dyn egui::TextBuffer, wrap: f32| {
                 let job = highlight(text.as_str(), dark, size, wrap);
                 ui.fonts_mut(|f| f.layout_job(job))
@@ -754,6 +806,9 @@ impl SqlTab {
                 let mut st = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
                 st.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(pos))));
                 st.store(ui.ctx(), id);
+            }
+            if std::mem::take(&mut self.focus_editor) {
+                ui.memory_mut(|m| m.request_focus(id));
             }
             let out = egui::TextEdit::multiline(&mut self.text)
                 .id(id)
@@ -776,10 +831,17 @@ impl SqlTab {
                     self.start_complete(sh);
                 } else {
                     self.ac = None;
+        self.ac_wait = None;
                 }
             }
             if let Some(r) = out.cursor_range {
                 self.cursor = (r.primary.index.into(), r.secondary.index.into());
+            }
+            if let Some(pos) = pair_cursor.filter(|_| out.response.changed()) {
+                let mut st = out.state.clone();
+                st.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(pos))));
+                st.store(ui.ctx(), id);
+                self.cursor = (pos, pos);
             }
             // autocomplete popup
             if let Some(ac) = &self.ac {
@@ -811,11 +873,13 @@ impl SqlTab {
                         self.text.replace_range(a..b, &item);
                         self.set_cursor = Some(start + item.chars().count());
                         self.ac = None;
+        self.ac_wait = None;
                         self.dirty = true;
                     }
                 }
             }
         });
+        self.scroll_y = scrolled.state.offset.y;
     }
 
     /// Asks the running job to stop. When the driver cannot interrupt the statement the tab stops waiting for it.
@@ -1064,7 +1128,10 @@ pub fn one_line(s: &str) -> String {
 }
 
 // ---------------------------------------------------------------- autocomplete
-pub fn complete(sh: &mut Shared, conn: Option<&str>, text: &str, cursor: usize) -> Option<Ac> {
+/// Proposals for the word before `cursor` (a byte offset). Only cached metadata is used: what is missing is
+/// requested in the background and the second value is true, so that the caller asks again when it arrives.
+/// Typing never waits for the database.
+pub fn complete(sh: &mut Shared, conn: Option<&str>, text: &str, cursor: usize) -> (Option<Ac>, bool) {
     let start = text[..cursor].rfind(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.' || c == '"')).map(|i| i + text[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1)).unwrap_or(0);
     let word = &text[start..cursor];
     let (qual, part) = match word.rsplit_once('.') {
@@ -1073,63 +1140,96 @@ pub fn complete(sh: &mut Shared, conn: Option<&str>, text: &str, cursor: usize) 
     };
     let part_l = part.trim_matches('"').to_lowercase();
     let part_start = start + word.len() - part.len();
-    let mut items: Vec<String> = Vec::new();
-    let mut push = |items: &mut Vec<String>, s: String| {
-        let hit = if crate::constants::AUTOCOMPLETE_MATCH_CONTAINS { s.to_lowercase().contains(&part_l) } else { s.to_lowercase().starts_with(&part_l) };
-        if hit && !items.contains(&s) {
-            items.push(s);
+    let mut waiting = false;
+    // (name, prefix match); the set keeps names unique without scanning the list for each one
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut hits: Vec<(String, bool)> = Vec::new();
+    let mut push = |s: &str| {
+        let l = s.to_lowercase();
+        let prefix = l.starts_with(&part_l);
+        let hit = prefix || (crate::constants::AUTOCOMPLETE_MATCH_CONTAINS && l.contains(&part_l));
+        if hit && seen.insert(s.to_string()) {
+            hits.push((s.to_string(), prefix));
         }
     };
     // statement around the cursor to resolve aliases
     let delim = sh.store.prefs.statement_delimiter.clone();
     let stmt = sqltext::statement_at(text, cursor.saturating_sub(1), &delim).map(|(a, b)| text[a..b].to_string()).unwrap_or_default();
     let refs = sqltext::referenced_tables(&stmt);
-    if let Some(conn) = conn {
-        if sh.is_connected(conn) {
-            let schema = sh.default_schema(conn);
-            let tables = sh.ensure_tables(conn, &schema);
-            if let Some(q) = &qual {
-                let ql = q.to_lowercase();
-                let target = refs.iter().find(|(t, a)| a.to_lowercase() == ql || t.to_lowercase() == ql).map(|(t, _)| t.clone()).or_else(|| tables.iter().find(|(t, _)| t.to_lowercase() == ql).map(|(t, _)| t.clone()));
-                if let Some(t) = target {
-                    let m = sh.ensure_tmeta(conn, &schema, &t);
-                    for c in m.columns {
-                        push(&mut items, c.name);
+    if let Some(conn) = conn.filter(|c| sh.is_connected(c)) {
+        match sh.cached_default_schema(conn) {
+            None => waiting = true,
+            Some(schema) => {
+                let have_tables = sh.want_tables(conn, &schema);
+                waiting |= !have_tables;
+                let key = (conn.to_string(), schema.clone());
+                // tables named in the statement that really exist (not the half-typed word under the cursor)
+                let real_refs: Vec<(String, String)> = match sh.tables.get(&key) {
+                    Some(tables) => refs.iter().filter_map(|(t, a)| tables.iter().find(|(x, _)| x.eq_ignore_ascii_case(t)).map(|(x, _)| (x.clone(), a.clone()))).collect(),
+                    None => vec![],
+                };
+                let columns_of = |sh: &mut Shared, t: &str, waiting: &mut bool, push: &mut dyn FnMut(&str)| {
+                    if sh.want_tmeta(conn, &schema, t) {
+                        if let Some(m) = sh.tmeta.get(&(conn.to_string(), schema.clone(), t.to_string())) {
+                            for c in &m.columns {
+                                push(&c.name);
+                            }
+                        }
+                    } else {
+                        *waiting = true;
                     }
-                } else if sh.ensure_schemas(conn).iter().any(|s| s.to_lowercase() == ql) {
-                    for (t, _) in tables.iter() {
-                        push(&mut items, t.clone());
+                };
+                if let Some(q) = &qual {
+                    let ql = q.to_lowercase();
+                    let target = real_refs
+                        .iter()
+                        .find(|(t, a)| a.to_lowercase() == ql || t.to_lowercase() == ql)
+                        .map(|(t, _)| t.clone())
+                        .or_else(|| sh.tables.get(&key).and_then(|ts| ts.iter().find(|(t, _)| t.to_lowercase() == ql).map(|(t, _)| t.clone())));
+                    if let Some(t) = target {
+                        columns_of(sh, &t, &mut waiting, &mut push);
+                    } else if let Some(sch) = sh.schemas.get(conn).and_then(|v| v.iter().find(|s| s.to_lowercase() == ql).cloned()) {
+                        // schema.table: the tables of that schema
+                        if sh.want_tables(conn, &sch) {
+                            for (t, _) in sh.tables.get(&(conn.to_string(), sch)).into_iter().flatten() {
+                                push(t);
+                            }
+                        } else {
+                            waiting = true;
+                        }
                     }
-                }
-            } else {
-                for (t, _) in &refs {
-                    let m = sh.ensure_tmeta(conn, &schema, t);
-                    for c in m.columns {
-                        push(&mut items, c.name);
+                } else {
+                    for (t, _) in &real_refs {
+                        columns_of(sh, t, &mut waiting, &mut push);
                     }
-                }
-                for (_, a) in &refs {
-                    push(&mut items, a.clone());
-                }
-                for (t, _) in tables.iter() {
-                    push(&mut items, t.clone());
+                    // aliases of tables that exist (a half-typed name is not an alias)
+                    for (_, a) in &real_refs {
+                        push(a);
+                    }
+                    for (t, _) in sh.tables.get(&key).into_iter().flatten() {
+                        push(t);
+                    }
                 }
             }
         }
     }
     if qual.is_none() {
         for k in sqltext::KEYWORDS {
-            push(&mut items, k.to_string());
+            push(k);
         }
     }
+    // names that start with the typed text come first
     if crate::constants::AUTOCOMPLETE_SORT_ALPHA {
-        items.sort_by_key(|s| s.to_lowercase());
+        hits.sort_by_cached_key(|(s, prefix)| (!*prefix, s.to_lowercase()));
+    } else {
+        hits.sort_by_key(|(_, prefix)| !*prefix);
     }
-    items.truncate(60);
+    hits.truncate(60);
+    let items: Vec<String> = hits.into_iter().map(|(s, _)| s).collect();
     if items.is_empty() || (items.len() == 1 && items[0].eq_ignore_ascii_case(part.trim_matches('"')) && !part.is_empty()) {
-        return None;
+        return (None, waiting);
     }
-    Some(Ac { items, sel: 0, start_char: char_of_byte(text, part_start) })
+    (Some(Ac { items, sel: 0, start_char: char_of_byte(text, part_start) }), waiting)
 }
 
 // ---------------------------------------------------------------- table tab
@@ -1158,18 +1258,22 @@ pub struct TableTab {
     pub total: Option<u64>,
     pub er: Option<ErTab>,
     pub confirm_save: bool,
+    /// restored from the last session: the metadata is read when the tab is first shown, not at startup
+    pub meta_pending: bool,
+    /// sort and view mode from the last session, applied to the first grid that loads
+    pub restore_view: Option<(Option<(usize, bool)>, ViewMode)>,
 }
 
 impl TableTab {
     pub fn new(sh: &mut Shared, conn: &str, schema: &str, table: &str, view: bool) -> TableTab {
-        let mut meta = sh.ensure_tmeta(conn, schema, table);
-        if view {
-            if let Some(sess) = sh.session(conn) {
-                if let Ok(def) = sess.lock().unwrap_or_else(|e| e.into_inner()).object_source("view", schema, table, "") {
-                    meta.ddl = def;
-                }
-            }
-        }
+        let mut t = TableTab::restored(sh, conn, schema, table, view);
+        t.load_meta(sh);
+        t
+    }
+
+    /// A tab that does not touch the connection: the metadata and the data load when it is shown.
+    pub fn restored(sh: &Shared, conn: &str, schema: &str, table: &str, view: bool) -> TableTab {
+        let meta = TableMeta::default();
         let src = EditSource { conn: conn.into(), schema: schema.into(), table: table.into(), meta: meta.clone(), qualified: sh.qualified(conn, schema, table), kind: sh.kind(conn) };
         TableTab {
             conn: conn.into(),
@@ -1188,6 +1292,27 @@ impl TableTab {
             total: None,
             er: None,
             confirm_save: false,
+            meta_pending: true,
+            restore_view: None,
+        }
+    }
+
+    fn load_meta(&mut self, sh: &mut Shared) {
+        let (conn, schema, table) = (self.conn.clone(), self.schema.clone(), self.table.clone());
+        let mut meta = sh.ensure_tmeta(&conn, &schema, &table);
+        if self.view {
+            if let Some(sess) = sh.session(&conn) {
+                if let Ok(def) = sess.lock().unwrap_or_else(|e| e.into_inner()).object_source("view", &schema, &table, "") {
+                    meta.ddl = def;
+                }
+            }
+        }
+        self.src = EditSource { conn: conn.clone(), schema: schema.clone(), table: table.clone(), meta: meta.clone(), qualified: sh.qualified(&conn, &schema, &table), kind: sh.kind(&conn) };
+        self.meta = meta;
+        self.meta_pending = false;
+        if let Some(g) = self.grid.as_mut() {
+            // a grid that loaded first must edit with the real keys
+            g.edit = Some(self.src.clone());
         }
     }
 
@@ -1249,8 +1374,9 @@ impl TableTab {
                                 g.dirty = true;
                             }
                         } else {
-                            let sort = self.grid.as_ref().and_then(|g| g.sort);
-                            let mode = self.grid.as_ref().map(|g| g.mode).unwrap_or(ViewMode::Grid);
+                            let restored = self.restore_view.take();
+                            let sort = self.grid.as_ref().map(|g| g.sort).unwrap_or_else(|| restored.and_then(|r| r.0));
+                            let mode = self.grid.as_ref().map(|g| g.mode).or(restored.map(|r| r.1)).unwrap_or(ViewMode::Grid);
                             let mut g = GridState::new(qr, &self.table);
                             g.edit = Some(self.src.clone());
                             if self.view {
@@ -1301,6 +1427,13 @@ impl TableTab {
     pub fn show(&mut self, ui: &mut Ui, sh: &mut Shared, tab_id: u64) {
         let pl = pal(ui.visuals().dark_mode);
         self.poll(sh);
+        if self.meta_pending && self.error.is_none() && self.job.is_none() {
+            // a tab restored from the last session connects only now that it is shown
+            match sh.connect(&self.conn) {
+                Ok(_) => self.load_meta(sh),
+                Err(e) => self.error = Some(e),
+            }
+        }
         if self.job.is_some() {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
         }
@@ -1599,6 +1732,9 @@ pub struct ErTab {
     pub edges: Vec<ErEdge>,
     pub pan: egui::Vec2,
     pub focus: Option<String>,
+    /// restored from the last session: the diagram is built when the tab is first shown
+    pub pending: bool,
+    pub error: Option<String>,
 }
 
 impl ErTab {
@@ -1645,10 +1781,32 @@ impl ErTab {
                 }
             }
         }
-        ErTab { conn: conn.into(), schema: schema.into(), boxes, edges, pan: egui::vec2(0.0, 0.0), focus: focus.map(|s| s.to_string()) }
+        ErTab { conn: conn.into(), schema: schema.into(), boxes, edges, pan: egui::vec2(0.0, 0.0), focus: focus.map(|s| s.to_string()), pending: false, error: None }
+    }
+
+    /// A diagram tab that does not touch the connection until it is shown.
+    pub fn restored(conn: &str, schema: &str, focus: Option<&str>) -> ErTab {
+        ErTab { conn: conn.into(), schema: schema.into(), boxes: vec![], edges: vec![], pan: egui::vec2(0.0, 0.0), focus: focus.map(|s| s.to_string()), pending: true, error: None }
     }
 
     pub fn show(&mut self, ui: &mut Ui, sh: &mut Shared, tab_id: u64) {
+        if self.pending {
+            match sh.connect(&self.conn) {
+                Ok(_) => *self = ErTab::build(sh, &self.conn.clone(), &self.schema.clone(), self.focus.clone().as_deref()),
+                Err(e) => {
+                    self.pending = false;
+                    self.error = Some(e);
+                }
+            }
+        }
+        if let Some(e) = self.error.clone() {
+            ui.colored_label(egui::Color32::from_rgb(210, 60, 60), format!("Não foi possível carregar o diagrama: {}", e));
+            if ui.button("Tentar de novo").clicked() {
+                self.error = None;
+                self.pending = true;
+            }
+            return;
+        }
         let (rect, bg) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         if bg.dragged() {
             self.pan += bg.drag_delta();
@@ -1855,5 +2013,133 @@ mod control_tests {
             t.execute(&mut sh, 1, true, false, false);
             assert!(t.error.as_deref().unwrap_or("").contains(want), "{} -> {:?}", text, t.error);
         }
+    }
+}
+
+#[cfg(test)]
+mod editor_tests {
+    use super::*;
+    use crate::db::{ConnConfig, Kind};
+    use crate::store::Store;
+    use egui::{Event, Pos2, RawInput, Rect};
+
+    fn sqlite() -> (Shared, String) {
+        let p = std::env::temp_dir().join(format!("dbr-editor-{}.sqlite", crate::store::new_project_id()));
+        crate::sample::create(&p).unwrap();
+        let mut cfg = ConnConfig::new(Kind::Sqlite);
+        cfg.database = p.to_string_lossy().to_string();
+        let id = cfg.id.clone();
+        let mut sh = Shared::new(Store::memory(), false, egui::Context::default());
+        sh.store.connections.push(cfg);
+        sh.connect(&id).unwrap();
+        (sh, id)
+    }
+
+    fn wait_meta(sh: &mut Shared) {
+        for _ in 0..500 {
+            sh.poll_meta();
+            if sh.meta_loading.is_empty() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("metadata did not arrive");
+    }
+
+    #[test]
+    fn completion_never_waits_for_the_database() {
+        let (mut sh, id) = sqlite();
+        let text = "select * from cust";
+        // first call: nothing cached yet; it answers right away (keywords only) and asks for the tables
+        let (ac, waiting) = complete(&mut sh, Some(&id), text, text.len());
+        assert!(waiting);
+        assert!(ac.map(|a| !a.items.contains(&"customers".to_string())).unwrap_or(true));
+        wait_meta(&mut sh);
+        let (ac, waiting) = complete(&mut sh, Some(&id), text, text.len());
+        assert!(!waiting);
+        let items = ac.unwrap().items;
+        assert!(items.contains(&"customers".to_string()));
+        let first_other = items.iter().position(|i| !i.to_lowercase().starts_with("cust")).unwrap_or(items.len());
+        assert!(items[first_other..].iter().all(|i| !i.to_lowercase().starts_with("cust")), "names that start with the text come first: {:?}", items);
+        // the half-typed table name is not looked up in the database
+        assert!(!sh.tmeta.keys().any(|k| k.2 == "cust"));
+        // columns of a table named in the statement arrive the same way
+        let text = "select c. from customers c";
+        let at = "select c.".len();
+        let (_, waiting) = complete(&mut sh, Some(&id), text, at);
+        assert!(waiting, "the columns are requested in the background");
+        wait_meta(&mut sh);
+        let (ac, waiting) = complete(&mut sh, Some(&id), text, at);
+        assert!(!waiting);
+        assert!(ac.unwrap().items.contains(&"first_name".to_string()));
+    }
+
+    #[test]
+    fn completion_with_many_tables_is_fast() {
+        let (mut sh, id) = sqlite();
+        let schema = "main".to_string();
+        let many: Vec<(String, bool)> = (0..30_000).map(|i| (format!("tabela_{:05}", i), i % 7 == 0)).collect();
+        sh.tables.insert((id.clone(), schema), many);
+        let text = "select * from tab";
+        let t0 = std::time::Instant::now();
+        let (ac, _) = complete(&mut sh, Some(&id), text, text.len());
+        let took = t0.elapsed();
+        assert_eq!(ac.unwrap().items.len(), 60);
+        assert!(took < std::time::Duration::from_millis(400), "took {:?}", took);
+    }
+
+    /// Runs one frame of the editor with the given typed events.
+    fn frame(ctx: &egui::Context, sh: &mut Shared, t: &mut SqlTab, events: Vec<Event>, time: &mut f64) {
+        *time += 0.05;
+        let mut input = RawInput::default();
+        input.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(900.0, 600.0)));
+        input.time = Some(*time);
+        input.events = events;
+        let mut out = ctx.run_ui(input, |ui| t.show(ui, sh, 7, true));
+        out.textures_delta.clear();
+    }
+
+    fn type_at(text: &str, at: usize, typed: &str) -> (String, usize) {
+        let (mut sh, _) = sqlite();
+        let ctx = egui::Context::default();
+        let mut t = SqlTab::new(None, text.into(), "t".into());
+        t.set_cursor = Some(at);
+        t.cursor = (at, at);
+        t.focus_editor = true;
+        let mut time = 0.0;
+        frame(&ctx, &mut sh, &mut t, vec![], &mut time);
+        frame(&ctx, &mut sh, &mut t, vec![], &mut time);
+        for ch in typed.chars() {
+            frame(&ctx, &mut sh, &mut t, vec![Event::Text(ch.to_string())], &mut time);
+        }
+        frame(&ctx, &mut sh, &mut t, vec![], &mut time);
+        (t.text.clone(), t.cursor.0)
+    }
+
+    #[test]
+    fn brackets_close_around_the_cursor_without_touching_the_next_character() {
+        // at the end of a line: the pair is closed and the cursor stays between them
+        assert_eq!(type_at("select count", 12, "("), ("select count()".to_string(), 13));
+        // typing the closing bracket steps over it
+        assert_eq!(type_at("select count", 12, "(*)"), ("select count(*)".to_string(), 15));
+        // before a space the pair is closed in place, the space is kept after it
+        assert_eq!(type_at("where x in  and y", 11, "("), ("where x in () and y".to_string(), 12));
+        // in front of a word: only the bracket, the word is not moved or eaten
+        assert_eq!(type_at("select abc", 7, "("), ("select (abc".to_string(), 8));
+        assert_eq!(type_at("select abc", 7, "'"), ("select 'abc".to_string(), 8));
+    }
+
+    #[test]
+    fn undefined_variables_are_asked_for_with_the_parameters() {
+        let (mut sh, id) = sqlite();
+        let mut t = SqlTab::new(Some(id), "@set fixo = 3\nselect ${fixo}, ${tabela_x}, :p from customers where id = ${tabela_x}".into(), "t".into());
+        t.execute(&mut sh, 1, true, false, false);
+        let req = sh.requests.iter().find_map(|r| match r {
+            Req::Params { names, stmts, .. } => Some((names.clone(), stmts.clone())),
+            _ => None,
+        });
+        let (names, stmts) = req.expect("the dialog is asked for");
+        assert_eq!(names, vec!["${tabela_x}".to_string(), "p".to_string()], "a variable defined by @set is not asked for");
+        assert!(stmts[0].starts_with("select 3, ${tabela_x}"));
     }
 }
